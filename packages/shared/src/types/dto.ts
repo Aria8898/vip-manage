@@ -1,5 +1,7 @@
 import type {
   MembershipStatus,
+  ReferralBonusStatus,
+  ReferralRewardStatus,
   RechargeReason,
   RechargeRecordSource,
   UserProfileChangeField
@@ -39,6 +41,7 @@ export interface AdminCreateUserRequestDTO {
   systemEmail?: string;
   familyGroupName?: string;
   userEmail?: string;
+  inviterUserId?: string;
 }
 
 export interface AdminUserDTO extends UserSummaryDTO {
@@ -49,6 +52,11 @@ export interface AdminUserDTO extends UserSummaryDTO {
   updatedAt: number;
   tokenVersion: number;
   statusToken: string;
+  inviterUserId?: string | null;
+  inviterUsername?: string | null;
+  inviteeCount?: number;
+  pendingRewardAmount?: number;
+  availableRewardAmount?: number;
 }
 
 export interface AdminCreateUserResponseDTO {
@@ -115,6 +123,10 @@ export interface AdminRechargeRecordDTO {
   occurredAt: number;
   recordedAt: number;
   source: RechargeRecordSource;
+  refundedAt: number | null;
+  refundedByAdminId: string | null;
+  refundAmount: number;
+  refundNote: string | null;
   createdAt: number;
 }
 
@@ -137,6 +149,105 @@ export interface AdminBackfillRechargeRequestDTO {
 export interface AdminListRechargeRecordsResponseDTO {
   items: AdminRechargeRecordDTO[];
   limit: number;
+}
+
+export interface AdminRefundRechargeRequestDTO {
+  refundAmount?: number;
+  refundNote?: string;
+}
+
+export interface AdminRefundRechargeResponseDTO {
+  user: UserSummaryDTO & {
+    updatedAt: number;
+  };
+  originalRecord: AdminRechargeRecordDTO;
+  refundRecord: AdminRechargeRecordDTO;
+}
+
+export interface AdminBindUserReferralRequestDTO {
+  inviterUserId: string;
+}
+
+export interface AdminBindUserReferralResponseDTO {
+  inviterUserId: string;
+  inviteeUserId: string;
+  boundAt: number;
+}
+
+export interface AdminReferralRewardRecordDTO {
+  id: string;
+  inviterUserId: string;
+  inviterUsername: string;
+  inviteeUserId: string;
+  inviteeUsername: string;
+  rechargeRecordId: string;
+  rechargeReason: RechargeReason;
+  rechargeSource: RechargeRecordSource;
+  paymentAmount: number;
+  rewardRateBps: number;
+  rewardAmount: number;
+  status: ReferralRewardStatus;
+  unlockAt: number;
+  availableAt: number | null;
+  canceledAt: number | null;
+  canceledReason: string | null;
+  withdrawnAt: number | null;
+  withdrawalId: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AdminListReferralRewardsResponseDTO {
+  items: AdminReferralRewardRecordDTO[];
+  limit: number;
+  status: ReferralRewardStatus | "all";
+}
+
+export interface AdminReferralWithdrawalDTO {
+  id: string;
+  inviterUserId: string;
+  inviterUsername: string;
+  amount: number;
+  processedByAdminId: string;
+  processedByAdminUsername: string;
+  note: string | null;
+  createdAt: number;
+}
+
+export interface AdminListReferralWithdrawalsResponseDTO {
+  items: AdminReferralWithdrawalDTO[];
+  limit: number;
+}
+
+export interface AdminWithdrawReferralRewardsRequestDTO {
+  inviterUserId: string;
+  note?: string;
+}
+
+export interface AdminWithdrawReferralRewardsResponseDTO {
+  withdrawal: AdminReferralWithdrawalDTO;
+  withdrawnCount: number;
+  withdrawnAmount: number;
+}
+
+export interface AdminReferralDashboardDTO {
+  pendingAmount: number;
+  availableAmount: number;
+  withdrawnAmount: number;
+  pendingCount: number;
+  availableCount: number;
+}
+
+export interface AdminReferralBonusGrantDTO {
+  id: string;
+  inviteeUserId: string;
+  triggerRechargeRecordId: string;
+  bonusRechargeRecordId: string;
+  bonusDays: number;
+  status: ReferralBonusStatus;
+  revokedAt: number | null;
+  revokeRechargeRecordId: string | null;
+  createdAt: number;
 }
 
 export interface AdminDashboardTodayDTO {

@@ -5,6 +5,8 @@ import {
   UserProfileChangeField,
   type AdminCreateUserResponseDTO,
   type AdminDashboardTodayDTO,
+  type AdminReferralDashboardDTO,
+  type AdminRefundRechargeResponseDTO,
   type AdminListUserProfileChangeLogsResponseDTO,
   type AdminListRechargeRecordsResponseDTO,
   type AdminResetUserTokenResponseDTO,
@@ -14,6 +16,7 @@ import {
   type AdminUpdateUserResponseDTO,
   type AdminUserDTO,
   type AdminUserProfileChangeRecordDTO,
+  type AdminWithdrawReferralRewardsResponseDTO,
 } from "@vip/shared";
 import {
   Button,
@@ -47,6 +50,7 @@ interface CreateUserFormValues {
   systemEmail?: string;
   familyGroupName?: string;
   userEmail?: string;
+  inviterUserId?: string;
 }
 
 interface RechargeFormValues {
@@ -93,6 +97,8 @@ const RECHARGE_REASON_LABELS: Record<RechargeReason, string> = {
 const RECHARGE_SOURCE_LABELS: Record<RechargeRecordSource, string> = {
   [RechargeRecordSource.NORMAL]: "普通充值",
   [RechargeRecordSource.BACKFILL]: "历史补录",
+  [RechargeRecordSource.SYSTEM_BONUS]: "系统赠送",
+  [RechargeRecordSource.REFUND_ROLLBACK]: "退款回滚",
 };
 
 const MAX_INTERNAL_NOTE_LENGTH = 200;
@@ -169,6 +175,10 @@ export const AdminShellPage = () => {
     null,
   );
   const [loadingDashboard, setLoadingDashboard] = useState(false);
+  const [referralDashboard, setReferralDashboard] =
+    useState<AdminReferralDashboardDTO | null>(null);
+  const [loadingReferralDashboard, setLoadingReferralDashboard] =
+    useState(false);
   const [rechargeRecords, setRechargeRecords] = useState<
     AdminRechargeRecordDTO[]
   >([]);
@@ -192,6 +202,8 @@ export const AdminShellPage = () => {
   const [backfillTargetUser, setBackfillTargetUser] =
     useState<AdminUserDTO | null>(null);
   const [resettingTokenUserId, setResettingTokenUserId] = useState("");
+  const [withdrawingUserId, setWithdrawingUserId] = useState("");
+  const [refundingRecordId, setRefundingRecordId] = useState("");
   const rechargeMode = Form.useWatch("mode", rechargeForm) ?? "dateRange";
   const rechargeDateRange = Form.useWatch("dateRange", rechargeForm);
   const backfillMode = Form.useWatch("mode", backfillForm) ?? "dateRange";
@@ -247,6 +259,26 @@ export const AdminShellPage = () => {
       );
     } finally {
       setLoadingDashboard(false);
+    }
+  }, [messageApi]);
+
+  const loadReferralDashboard = useCallback(async () => {
+    setLoadingReferralDashboard(true);
+
+    try {
+      const response = await apiRequest<AdminReferralDashboardDTO>(
+        "/admin/referral/dashboard",
+        {
+          method: "GET",
+        },
+      );
+      setReferralDashboard(response.data);
+    } catch (error) {
+      messageApi.error(
+        error instanceof Error ? error.message : "加载邀请奖励概览失败",
+      );
+    } finally {
+      setLoadingReferralDashboard(false);
     }
   }, [messageApi]);
 
@@ -319,13 +351,20 @@ export const AdminShellPage = () => {
     void loadSession();
     void loadUsers("");
     void loadDashboard();
+    void loadReferralDashboard();
     void loadRechargeRecords();
     void loadProfileChangeLogs();
 
     return () => {
       cancelled = true;
     };
-  }, [loadDashboard, loadProfileChangeLogs, loadRechargeRecords, loadUsers]);
+  }, [
+    loadDashboard,
+    loadProfileChangeLogs,
+    loadRechargeRecords,
+    loadReferralDashboard,
+    loadUsers,
+  ]);
 
   const handleLogout = async () => {
     setLoggingOut(true);
@@ -530,6 +569,7 @@ export const AdminShellPage = () => {
       const systemEmail = values.systemEmail?.trim().toLowerCase() || undefined;
       const familyGroupName = values.familyGroupName?.trim() || undefined;
       const userEmail = values.userEmail?.trim().toLowerCase() || undefined;
+      const inviterUserId = values.inviterUserId?.trim() || undefined;
 
       setSubmittingCreate(true);
       const response = await apiRequest<AdminCreateUserResponseDTO>(
@@ -541,6 +581,7 @@ export const AdminShellPage = () => {
             systemEmail,
             familyGroupName,
             userEmail,
+            inviterUserId,
           }),
         },
       );
@@ -642,6 +683,58 @@ export const AdminShellPage = () => {
     }
   };
 
+  const handleWithdrawRewards = async (user: AdminUserDTO) => {
+    setWithdrawingUserId(user.id);
+
+    try {
+      const response = await apiRequest<AdminWithdrawReferralRewardsResponseDTO>(
+        "/admin/referral-withdrawals",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            inviterUserId: user.id,
+          }),
+        },
+      );
+      await Promise.all([loadUsers(activeQuery), loadReferralDashboard()]);
+      messageApi.success(
+        `提现成功：${user.username}，金额 ${formatPaymentAmount(response.data.withdrawnAmount)}`,
+      );
+    } catch (error) {
+      messageApi.error(
+        error instanceof Error ? error.message : "奖励提现失败",
+      );
+    } finally {
+      setWithdrawingUserId("");
+    }
+  };
+
+  const handleRefundRechargeRecord = async (record: AdminRechargeRecordDTO) => {
+    setRefundingRecordId(record.id);
+
+    try {
+      const response = await apiRequest<AdminRefundRechargeResponseDTO>(
+        `/admin/recharge-records/${encodeURIComponent(record.id)}/refund`,
+        {
+          method: "POST",
+        },
+      );
+      await Promise.all([
+        loadUsers(activeQuery),
+        loadDashboard(),
+        loadReferralDashboard(),
+        loadRechargeRecords(),
+      ]);
+      messageApi.success(
+        `退款回滚完成：${response.data.user.username}，当前到期 ${formatUnixSeconds(response.data.user.expireAt)}`,
+      );
+    } catch (error) {
+      messageApi.error(error instanceof Error ? error.message : "退款失败");
+    } finally {
+      setRefundingRecordId("");
+    }
+  };
+
   const handleRechargeSubmit = async () => {
     if (!rechargeTargetUser) {
       return;
@@ -682,6 +775,7 @@ export const AdminShellPage = () => {
       await Promise.all([
         loadUsers(activeQuery),
         loadDashboard(),
+        loadReferralDashboard(),
         loadRechargeRecords(),
       ]);
       messageApi.success(
@@ -748,6 +842,7 @@ export const AdminShellPage = () => {
       await Promise.all([
         loadUsers(activeQuery),
         loadDashboard(),
+        loadReferralDashboard(),
         loadRechargeRecords(),
       ]);
       messageApi.success(
@@ -835,6 +930,43 @@ export const AdminShellPage = () => {
         render: (value: string | null) => value || "-",
       },
       {
+        title: "邀请人",
+        key: "inviter",
+        width: 180,
+        render: (_, record) =>
+          record.inviterUsername ? (
+            <Space direction="vertical" size={0}>
+              <Typography.Text>{record.inviterUsername}</Typography.Text>
+              <Typography.Text type="secondary" code>
+                {record.inviterUserId}
+              </Typography.Text>
+            </Space>
+          ) : (
+            "-"
+          ),
+      },
+      {
+        title: "邀请人数",
+        dataIndex: "inviteeCount",
+        key: "inviteeCount",
+        width: 100,
+        render: (value: number | undefined) => value ?? 0,
+      },
+      {
+        title: "预计奖励",
+        dataIndex: "pendingRewardAmount",
+        key: "pendingRewardAmount",
+        width: 120,
+        render: (value: number | undefined) => formatPaymentAmount(value ?? 0),
+      },
+      {
+        title: "可提现奖励",
+        dataIndex: "availableRewardAmount",
+        key: "availableRewardAmount",
+        width: 130,
+        render: (value: number | undefined) => formatPaymentAmount(value ?? 0),
+      },
+      {
         title: "状态",
         dataIndex: "expireAt",
         key: "status",
@@ -862,7 +994,7 @@ export const AdminShellPage = () => {
         title: "操作",
         key: "actions",
         fixed: "right",
-        width: 280,
+        width: 340,
         render: (_, user) => (
           <Space size={6}>
             <Tooltip title={copiedUserId === user.id ? "已复制" : "复制链接"}>
@@ -912,6 +1044,27 @@ export const AdminShellPage = () => {
               </Button>
             </Tooltip>
             <Popconfirm
+              title="提现可提现奖励"
+              description={`确认给 ${user.username} 提现 ${formatPaymentAmount(user.availableRewardAmount ?? 0)} 吗？`}
+              okText="确认提现"
+              cancelText="取消"
+              onConfirm={() => {
+                void handleWithdrawRewards(user);
+              }}
+              disabled={(user.availableRewardAmount ?? 0) <= 0}
+            >
+              <Tooltip title="提现">
+                <Button
+                  shape="circle"
+                  loading={withdrawingUserId === user.id}
+                  disabled={(user.availableRewardAmount ?? 0) <= 0}
+                  aria-label="提现"
+                >
+                  ¥
+                </Button>
+              </Tooltip>
+            </Popconfirm>
+            <Popconfirm
               title="重置 Token"
               description="旧链接会立即失效，确认继续？"
               okText="确认重置"
@@ -944,6 +1097,9 @@ export const AdminShellPage = () => {
       handleOpenRechargeModal,
       handleOpenUpdateModal,
       handleResetToken,
+      handleWithdrawRewards,
+      withdrawingUserId,
+      formatPaymentAmount,
       resettingTokenUserId,
     ],
   );
@@ -991,7 +1147,9 @@ export const AdminShellPage = () => {
         key: "changeDays",
         width: 100,
         render: (value: number) => (
-          <Typography.Text type="success">+{value}</Typography.Text>
+          <Typography.Text type={value >= 0 ? "success" : "danger"}>
+            {value >= 0 ? `+${value}` : value}
+          </Typography.Text>
         ),
       },
       {
@@ -1044,12 +1202,58 @@ export const AdminShellPage = () => {
         key: "operatorAdminUsername",
         width: 140,
       },
+      {
+        title: "退款状态",
+        key: "refundStatus",
+        width: 120,
+        render: (_, record) =>
+          record.refundedAt && record.refundedAt > 0 ? (
+            <Tag color="error">已退款</Tag>
+          ) : (
+            <Tag>未退款</Tag>
+          ),
+      },
+      {
+        title: "操作",
+        key: "actions",
+        width: 120,
+        render: (_, record) => {
+          const canRefund =
+            (!record.refundedAt || record.refundedAt <= 0) &&
+            record.changeDays > 0 &&
+            record.source !== RechargeRecordSource.REFUND_ROLLBACK;
+
+          return (
+            <Popconfirm
+              title="确认退款并回滚天数？"
+              description="将回滚本笔充值天数，并取消对应邀请奖励。"
+              okText="确认退款"
+              cancelText="取消"
+              onConfirm={() => {
+                void handleRefundRechargeRecord(record);
+              }}
+              disabled={!canRefund}
+            >
+              <Button
+                danger
+                size="small"
+                loading={refundingRecordId === record.id}
+                disabled={!canRefund}
+              >
+                退款
+              </Button>
+            </Popconfirm>
+          );
+        },
+      },
     ],
     [
       formatPaymentAmount,
       formatRechargeReason,
       formatRechargeSource,
       formatUnixSeconds,
+      handleRefundRechargeRecord,
+      refundingRecordId,
     ],
   );
 
@@ -1184,6 +1388,41 @@ export const AdminShellPage = () => {
         </Typography.Paragraph>
       </Card>
 
+      <Card className="admin-overview-card" bordered={false}>
+        <Typography.Title level={5} style={{ marginTop: 0 }}>
+          邀请奖励概览
+        </Typography.Title>
+        <Row gutter={[16, 16]}>
+          <Col xs={24} sm={12} md={8}>
+            <Statistic
+              title="预计奖励总额"
+              value={referralDashboard?.pendingAmount || 0}
+              loading={loadingReferralDashboard}
+              precision={2}
+              prefix="¥"
+            />
+          </Col>
+          <Col xs={24} sm={12} md={8}>
+            <Statistic
+              title="可提现总额"
+              value={referralDashboard?.availableAmount || 0}
+              loading={loadingReferralDashboard}
+              precision={2}
+              prefix="¥"
+            />
+          </Col>
+          <Col xs={24} sm={12} md={8}>
+            <Statistic
+              title="已提现总额"
+              value={referralDashboard?.withdrawnAmount || 0}
+              loading={loadingReferralDashboard}
+              precision={2}
+              prefix="¥"
+            />
+          </Col>
+        </Row>
+      </Card>
+
       <Card className="admin-table-card" bordered={false}>
         <div className="admin-toolbar-row">
           <Input.Search
@@ -1208,7 +1447,7 @@ export const AdminShellPage = () => {
             pageSize: 20,
             showSizeChanger: false,
           }}
-          scroll={{ x: 1600 }}
+          scroll={{ x: 2200 }}
         />
       </Card>
 
@@ -1234,7 +1473,7 @@ export const AdminShellPage = () => {
             pageSize: 10,
             showSizeChanger: false,
           }}
-          scroll={{ x: 1800 }}
+          scroll={{ x: 2200 }}
         />
       </Card>
 
@@ -1338,6 +1577,18 @@ export const AdminShellPage = () => {
             ]}
           >
             <Input placeholder="可选，例如：user@example.com" />
+          </Form.Item>
+          <Form.Item
+            label="邀请人用户 ID"
+            name="inviterUserId"
+            rules={[
+              {
+                max: 80,
+                message: "最多 80 个字符",
+              },
+            ]}
+          >
+            <Input placeholder="可选，填用户 ID 绑定邀请关系" />
           </Form.Item>
         </Form>
       </Modal>

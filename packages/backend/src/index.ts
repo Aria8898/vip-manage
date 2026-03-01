@@ -3,15 +3,25 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { sign, verify } from "hono/jwt";
 import {
   MembershipStatus,
+  ReferralRewardStatus,
   RechargeReason,
   RechargeRecordSource,
   UserProfileChangeField,
+  type AdminBindUserReferralRequestDTO,
+  type AdminBindUserReferralResponseDTO,
   type AdminBackfillRechargeRequestDTO,
   type AdminCreateUserRequestDTO,
   type AdminCreateUserResponseDTO,
   type AdminDashboardTodayDTO,
+  type AdminListReferralRewardsResponseDTO,
+  type AdminListReferralWithdrawalsResponseDTO,
   type AdminListUserProfileChangeLogsResponseDTO,
   type AdminListRechargeRecordsResponseDTO,
+  type AdminRefundRechargeRequestDTO,
+  type AdminRefundRechargeResponseDTO,
+  type AdminReferralDashboardDTO,
+  type AdminReferralRewardRecordDTO,
+  type AdminReferralWithdrawalDTO,
   type AdminResetUserTokenResponseDTO,
   type AdminListUsersResponseDTO,
   type AdminLoginRequestDTO,
@@ -24,6 +34,8 @@ import {
   type AdminUpdateUserResponseDTO,
   type AdminUserDTO,
   type AdminUserProfileChangeRecordDTO,
+  type AdminWithdrawReferralRewardsRequestDTO,
+  type AdminWithdrawReferralRewardsResponseDTO,
   type ApiResponse,
   type HealthDTO,
   type UserStatusHistoryRecordDTO,
@@ -37,6 +49,21 @@ import {
   recordFailedLogin
 } from "./lib/login-failure-rate-limit";
 import { verifyPasswordHash } from "./lib/password-hash";
+import {
+  REFERRAL_BONUS_DAYS,
+  bindUserReferral,
+  cancelReferralRewardsByRechargeRecord,
+  confirmInviteeBonusGrant,
+  countInviteesByInviter,
+  createReferralRewardForRecharge,
+  findGrantedBonusByTriggerRechargeRecord,
+  getReferralDashboard,
+  markBonusGrantRevoked,
+  reserveInviteeBonusGrant,
+  summarizeReferralRewardsByInviter,
+  unlockPendingReferralRewards,
+  withdrawAvailableReferralRewards
+} from "./modules/referral/service";
 
 type Bindings = {
   DB: D1Database;
@@ -72,6 +99,8 @@ const MAX_EMAIL_LENGTH = 120;
 const MAX_INTERNAL_NOTE_LENGTH = 200;
 const MAX_EXTERNAL_NOTE_LENGTH = 200;
 const MAX_PROFILE_CHANGE_NOTE_LENGTH = 200;
+const MAX_REFUND_NOTE_LENGTH = 200;
+const MAX_WITHDRAW_NOTE_LENGTH = 200;
 const MAX_RECHARGE_DAYS = 3650;
 const MAX_PAYMENT_AMOUNT = 1000000;
 const SECONDS_PER_DAY = 24 * 60 * 60;
@@ -79,7 +108,7 @@ const UTC8_OFFSET_SECONDS = 8 * 60 * 60;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
 const COMPACT_USER_TOKEN_MARKER = 2;
 const COMPACT_USER_TOKEN_SIGNATURE_BYTES = 16;
-type HttpStatus = 200 | 400 | 401 | 404 | 429 | 500;
+type HttpStatus = 200 | 400 | 401 | 404 | 409 | 429 | 500;
 
 interface AdminUserRow {
   id: string;
@@ -127,7 +156,25 @@ interface RechargeRecordRow {
   occurred_at: number | null;
   recorded_at: number | null;
   source: string | null;
+  refunded_at: number | null;
+  refunded_by_admin_id: string | null;
+  refund_amount_cents: number | null;
+  refund_note: string | null;
   created_at: number;
+}
+
+interface RechargeRecordForRefundRow {
+  id: string;
+  user_id: string;
+  reason: string;
+  source: string | null;
+  change_days: number;
+  payment_amount_cents: number | null;
+  refunded_at: number | null;
+}
+
+interface RechargeRefundTargetWithUserRow extends RechargeRecordForRefundRow {
+  username: string;
 }
 
 interface UserProfileChangeLogRow {
@@ -147,6 +194,46 @@ interface UserProfileChangeLogRow {
 interface DashboardTodayRow {
   recharge_count: number | string | null;
   total_change_days: number | string | null;
+}
+
+interface UserReferralRow {
+  invitee_user_id: string;
+  inviter_user_id: string;
+  inviter_username: string;
+}
+
+interface ReferralRewardLedgerRow {
+  id: string;
+  inviter_user_id: string;
+  inviter_username: string;
+  invitee_user_id: string;
+  invitee_username: string;
+  recharge_record_id: string;
+  recharge_reason: string;
+  recharge_source: string;
+  payment_amount_cents: number;
+  reward_rate_bps: number;
+  reward_amount_cents: number;
+  status: string;
+  unlock_at: number;
+  available_at: number | null;
+  canceled_at: number | null;
+  canceled_reason: string | null;
+  withdrawn_at: number | null;
+  withdrawal_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+interface ReferralWithdrawalRow {
+  id: string;
+  inviter_user_id: string;
+  inviter_username: string;
+  amount_cents: number;
+  processed_by_admin_id: string;
+  processed_by_admin_username: string;
+  note: string | null;
+  created_at: number;
 }
 
 interface UserTotalChangeDaysRow {
@@ -197,6 +284,8 @@ let cachedHasUsersTokenVersionColumn: boolean | null = null;
 let cachedHasUsersExtraProfileColumns: boolean | null = null;
 let cachedHasRechargeTimelineColumns: boolean | null = null;
 let cachedHasRechargeExternalNoteColumn: boolean | null = null;
+let cachedHasRechargeRefundColumns: boolean | null = null;
+let cachedHasReferralTables: boolean | null = null;
 
 const getCurrentTimestamp = (): number => Math.floor(Date.now() / 1000);
 
@@ -474,6 +563,45 @@ const hasRechargeExternalNoteColumn = async (db: D1Database): Promise<boolean> =
   return hasColumn;
 };
 
+const hasRechargeRefundColumns = async (db: D1Database): Promise<boolean> => {
+  if (cachedHasRechargeRefundColumns !== null) {
+    return cachedHasRechargeRefundColumns;
+  }
+
+  const rows = await db.prepare("PRAGMA table_info(recharge_records)").all<SqliteTableInfoRow>();
+  const columnNames = new Set((rows.results || []).map((row) => row.name));
+  const hasColumns =
+    columnNames.has("refunded_at") &&
+    columnNames.has("refund_note") &&
+    columnNames.has("refunded_by_admin_id") &&
+    columnNames.has("refund_amount_cents");
+  cachedHasRechargeRefundColumns = hasColumns;
+
+  return hasColumns;
+};
+
+const hasReferralTables = async (db: D1Database): Promise<boolean> => {
+  if (cachedHasReferralTables !== null) {
+    return cachedHasReferralTables;
+  }
+
+  const rows = await db
+    .prepare(
+      `SELECT name
+       FROM sqlite_master
+       WHERE type = 'table' AND name IN (
+         'user_referrals',
+         'referral_reward_ledger',
+         'referral_withdrawals',
+         'referral_bonus_grants'
+       )`
+    )
+    .all<SqliteTableInfoRow>();
+  cachedHasReferralTables = (rows.results || []).length === 4;
+
+  return cachedHasReferralTables;
+};
+
 const normalizeInternalNote = (value: unknown): string | null => {
   if (typeof value !== "string") {
     return null;
@@ -501,6 +629,19 @@ const normalizeOptionalText = (value: unknown): string | null => {
 };
 
 const normalizeProfileChangeNote = (value: unknown): string | null => {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  return trimmed;
+};
+
+const normalizeWithdrawNote = (value: unknown): string | null => {
   if (typeof value !== "string") {
     return null;
   }
@@ -559,7 +700,25 @@ const toRechargeReason = (value: string): RechargeReason =>
 const toRechargeRecordSource = (value: string | null | undefined): RechargeRecordSource =>
   value === RechargeRecordSource.BACKFILL
     ? RechargeRecordSource.BACKFILL
-    : RechargeRecordSource.NORMAL;
+    : value === RechargeRecordSource.SYSTEM_BONUS
+      ? RechargeRecordSource.SYSTEM_BONUS
+      : value === RechargeRecordSource.REFUND_ROLLBACK
+        ? RechargeRecordSource.REFUND_ROLLBACK
+        : RechargeRecordSource.NORMAL;
+
+const toReferralRewardStatus = (value: string): ReferralRewardStatus => {
+  if (value === ReferralRewardStatus.PENDING) {
+    return ReferralRewardStatus.PENDING;
+  }
+  if (value === ReferralRewardStatus.AVAILABLE) {
+    return ReferralRewardStatus.AVAILABLE;
+  }
+  if (value === ReferralRewardStatus.CANCELED) {
+    return ReferralRewardStatus.CANCELED;
+  }
+
+  return ReferralRewardStatus.WITHDRAWN;
+};
 
 const toOccurredAt = (row: {
   occurred_at: number | null;
@@ -587,6 +746,48 @@ const toAdminRechargeRecordDTO = (row: RechargeRecordRow): AdminRechargeRecordDT
   occurredAt: toOccurredAt(row),
   recordedAt: toRecordedAt(row),
   source: toRechargeRecordSource(row.source),
+  refundedAt: row.refunded_at ?? null,
+  refundedByAdminId: row.refunded_by_admin_id ?? null,
+  refundAmount: toPaymentAmount(row.refund_amount_cents),
+  refundNote: row.refund_note ?? null,
+  createdAt: row.created_at
+});
+
+const toAdminReferralRewardRecordDTO = (
+  row: ReferralRewardLedgerRow
+): AdminReferralRewardRecordDTO => ({
+  id: row.id,
+  inviterUserId: row.inviter_user_id,
+  inviterUsername: row.inviter_username,
+  inviteeUserId: row.invitee_user_id,
+  inviteeUsername: row.invitee_username,
+  rechargeRecordId: row.recharge_record_id,
+  rechargeReason: toRechargeReason(row.recharge_reason),
+  rechargeSource: toRechargeRecordSource(row.recharge_source),
+  paymentAmount: toPaymentAmount(row.payment_amount_cents),
+  rewardRateBps: row.reward_rate_bps,
+  rewardAmount: toPaymentAmount(row.reward_amount_cents),
+  status: toReferralRewardStatus(row.status),
+  unlockAt: row.unlock_at,
+  availableAt: row.available_at ?? null,
+  canceledAt: row.canceled_at ?? null,
+  canceledReason: row.canceled_reason ?? null,
+  withdrawnAt: row.withdrawn_at ?? null,
+  withdrawalId: row.withdrawal_id ?? null,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at
+});
+
+const toAdminReferralWithdrawalDTO = (
+  row: ReferralWithdrawalRow
+): AdminReferralWithdrawalDTO => ({
+  id: row.id,
+  inviterUserId: row.inviter_user_id,
+  inviterUsername: row.inviter_username,
+  amount: toPaymentAmount(row.amount_cents),
+  processedByAdminId: row.processed_by_admin_id,
+  processedByAdminUsername: row.processed_by_admin_username,
+  note: row.note,
   createdAt: row.created_at
 });
 
@@ -654,6 +855,34 @@ const requireRechargeExternalNoteColumn = async (
     return {
       ok: false,
       response: fail(c, 500, "database migration required: recharge_records.external_note column missing")
+    };
+  }
+
+  return { ok: true };
+};
+
+const requireRechargeRefundColumns = async (
+  c: AppContext
+): Promise<{ ok: true } | { ok: false; response: Response }> => {
+  const hasColumns = await hasRechargeRefundColumns(c.env.DB);
+  if (!hasColumns) {
+    return {
+      ok: false,
+      response: fail(c, 500, "database migration required: recharge refund columns missing")
+    };
+  }
+
+  return { ok: true };
+};
+
+const requireReferralTables = async (
+  c: AppContext
+): Promise<{ ok: true } | { ok: false; response: Response }> => {
+  const hasTables = await hasReferralTables(c.env.DB);
+  if (!hasTables) {
+    return {
+      ok: false,
+      response: fail(c, 500, "database migration required: referral tables missing")
     };
   }
 
@@ -783,6 +1012,10 @@ const createAndRebuildRechargeRecord = async (
       r.occurred_at,
       r.recorded_at,
       r.source,
+      r.refunded_at,
+      r.refunded_by_admin_id,
+      r.refund_amount_cents,
+      r.refund_note,
       r.created_at
     FROM recharge_records AS r
     INNER JOIN users AS u ON u.id = r.user_id
@@ -805,6 +1038,94 @@ const createAndRebuildRechargeRecord = async (
     },
     record: toAdminRechargeRecordDTO(insertedRow)
   };
+};
+
+const getRechargeRecordById = async (
+  db: D1Database,
+  recordId: string
+): Promise<RechargeRecordRow | null> =>
+  db
+    .prepare(
+      `SELECT
+        r.id,
+        r.user_id,
+        u.username AS username,
+        r.change_days,
+        r.reason,
+        r.payment_amount_cents,
+        r.internal_note,
+        r.external_note,
+        r.expire_before,
+        r.expire_after,
+        r.operator_admin_id,
+        a.username AS operator_admin_username,
+        r.occurred_at,
+        r.recorded_at,
+        r.source,
+        r.refunded_at,
+        r.refunded_by_admin_id,
+        r.refund_amount_cents,
+        r.refund_note,
+        r.created_at
+       FROM recharge_records AS r
+       INNER JOIN users AS u ON u.id = r.user_id
+       INNER JOIN admin_users AS a ON a.id = r.operator_admin_id
+       WHERE r.id = ?
+       LIMIT 1`
+    )
+    .bind(recordId)
+    .first<RechargeRecordRow>();
+
+const applyReferralEffectsForRecharge = async (
+  c: AppContext,
+  params: {
+    userId: string;
+    recharge: AdminRechargeUserResponseDTO;
+    occurredAt: number;
+  }
+): Promise<void> => {
+  const rewardResult = await createReferralRewardForRecharge(c.env.DB, {
+    inviteeUserId: params.userId,
+    rechargeRecordId: params.recharge.record.id,
+    rechargeReason: params.recharge.record.reason,
+    rechargeSource: params.recharge.record.source,
+    paymentAmountCents: toPaymentAmountCents(params.recharge.record.paymentAmount),
+    unlockAt: params.recharge.record.expireAfter,
+    now: params.occurredAt
+  });
+
+  if (!rewardResult.created) {
+    return;
+  }
+
+  const reservedBonus = await reserveInviteeBonusGrant(c.env.DB, {
+    inviteeUserId: params.userId,
+    triggerRechargeRecordId: params.recharge.record.id,
+    bonusDays: REFERRAL_BONUS_DAYS,
+    now: params.occurredAt
+  });
+  if (!reservedBonus) {
+    return;
+  }
+
+  const bonusRecharge = await createAndRebuildRechargeRecord(c, {
+    userId: params.userId,
+    days: REFERRAL_BONUS_DAYS,
+    reason: RechargeReason.REFERRAL_REWARD,
+    paymentAmountCents: 0,
+    internalNote: "invitee first paid recharge bonus",
+    externalNote: "邀请奖励：首单赠送 30 天会员",
+    occurredAt: params.occurredAt,
+    source: RechargeRecordSource.SYSTEM_BONUS
+  });
+  if (!bonusRecharge) {
+    return;
+  }
+
+  await confirmInviteeBonusGrant(c.env.DB, {
+    inviteeUserId: params.userId,
+    bonusRechargeRecordId: bonusRecharge.record.id
+  });
 };
 
 const buildApiResponse = <T>(
@@ -1089,6 +1410,7 @@ app.post("/api/admin/users", async (c) => {
   const systemEmail = normalizeOptionalText(body?.systemEmail)?.toLowerCase();
   const familyGroupName = normalizeOptionalText(body?.familyGroupName);
   const userEmail = normalizeOptionalText(body?.userEmail)?.toLowerCase();
+  const inviterUserId = normalizeOptionalText(body?.inviterUserId);
   if (familyGroupName && familyGroupName.length > MAX_FAMILY_GROUP_NAME_LENGTH) {
     return fail(c, 400, `familyGroupName must be <= ${MAX_FAMILY_GROUP_NAME_LENGTH} chars`);
   }
@@ -1103,6 +1425,12 @@ app.post("/api/admin/users", async (c) => {
   }
   if (userEmail && !EMAIL_PATTERN.test(userEmail)) {
     return fail(c, 400, "userEmail must be a valid email");
+  }
+  if (inviterUserId) {
+    const referralCheck = await requireReferralTables(c);
+    if (!referralCheck.ok) {
+      return referralCheck.response;
+    }
   }
 
   const userId = crypto.randomUUID();
@@ -1146,6 +1474,20 @@ app.post("/api/admin/users", async (c) => {
   }
 
   const now = getCurrentTimestamp();
+  if (inviterUserId) {
+    const bindResult = await bindUserReferral(c.env.DB, {
+      inviterUserId,
+      inviteeUserId: userId,
+      boundByAdminId: c.get("adminSession").adminId,
+      now,
+      checkProfileAbuse: hasUsersProfileColumns
+    });
+    if (!bindResult.ok) {
+      await c.env.DB.prepare("DELETE FROM users WHERE id = ?").bind(userId).run();
+      return fail(c, 400, bindResult.message);
+    }
+  }
+
   const payload: AdminCreateUserResponseDTO = {
     user: {
       id: userId,
@@ -1157,7 +1499,8 @@ app.post("/api/admin/users", async (c) => {
       createdAt: now,
       updatedAt: now,
       tokenVersion,
-      statusToken
+      statusToken,
+      inviterUserId: inviterUserId ?? null
     }
   };
 
@@ -1200,7 +1543,44 @@ app.get("/api/admin/users", async (c) => {
       .bind(USER_LIST_LIMIT)
       .all<UserRow>();
 
-  const users = await Promise.all((rows.results || []).map((row) => toAdminUserDTO(row, tokenSecret)));
+  let users = await Promise.all((rows.results || []).map((row) => toAdminUserDTO(row, tokenSecret)));
+  const hasReferral = await hasReferralTables(c.env.DB);
+  if (hasReferral && users.length > 0) {
+    const userIds = users.map((user) => user.id);
+    const placeholders = userIds.map(() => "?").join(", ");
+    const referralRows = await c.env.DB
+      .prepare(
+        `SELECT
+          r.invitee_user_id,
+          r.inviter_user_id,
+          i.username AS inviter_username
+         FROM user_referrals AS r
+         INNER JOIN users AS i ON i.id = r.inviter_user_id
+         WHERE r.invitee_user_id IN (${placeholders})`
+      )
+      .bind(...userIds)
+      .all<UserReferralRow>();
+    const inviteeToInviter = new Map(
+      (referralRows.results || []).map((row) => [row.invitee_user_id, row])
+    );
+    const inviteeCountMap = await countInviteesByInviter(c.env.DB, userIds);
+    const rewardSummaryMap = await summarizeReferralRewardsByInviter(c.env.DB, userIds);
+
+    users = users.map((user) => {
+      const inviter = inviteeToInviter.get(user.id);
+      const rewardSummary = rewardSummaryMap.get(user.id);
+
+      return {
+        ...user,
+        inviterUserId: inviter?.inviter_user_id ?? null,
+        inviterUsername: inviter?.inviter_username ?? null,
+        inviteeCount: inviteeCountMap.get(user.id) ?? 0,
+        pendingRewardAmount: toPaymentAmount(rewardSummary?.pendingAmountCents || 0),
+        availableRewardAmount: toPaymentAmount(rewardSummary?.availableAmountCents || 0)
+      };
+    });
+  }
+
   const payload: AdminListUsersResponseDTO = {
     items: users,
     query
@@ -1407,6 +1787,48 @@ app.patch("/api/admin/users/:id", async (c) => {
   return ok(c, payload);
 });
 
+app.post("/api/admin/users/:id/referral/bind", async (c) => {
+  const referralCheck = await requireReferralTables(c);
+  if (!referralCheck.ok) {
+    return referralCheck.response;
+  }
+
+  const inviteeUserId = c.req.param("id")?.trim();
+  if (!inviteeUserId) {
+    return fail(c, 400, "user id is required");
+  }
+
+  const body = await c.req
+    .json<Partial<AdminBindUserReferralRequestDTO>>()
+    .catch(() => null);
+  const inviterUserId =
+    typeof body?.inviterUserId === "string" ? body.inviterUserId.trim() : "";
+  if (!inviterUserId) {
+    return fail(c, 400, "inviterUserId is required");
+  }
+
+  const bindResult = await bindUserReferral(c.env.DB, {
+    inviterUserId,
+    inviteeUserId,
+    boundByAdminId: c.get("adminSession").adminId,
+    now: getCurrentTimestamp(),
+    checkProfileAbuse: await hasUsersExtraProfileColumns(c.env.DB)
+  });
+  if (!bindResult.ok) {
+    if (bindResult.code === "INVITEE_ALREADY_BOUND") {
+      return fail(c, 409, bindResult.message);
+    }
+    return fail(c, 400, bindResult.message);
+  }
+
+  const payload: AdminBindUserReferralResponseDTO = {
+    inviterUserId: bindResult.inviterUserId,
+    inviteeUserId: bindResult.inviteeUserId,
+    boundAt: bindResult.boundAt
+  };
+  return ok(c, payload);
+});
+
 app.post("/api/admin/users/:id/recharge", async (c) => {
   const userId = c.req.param("id")?.trim();
   if (!userId) {
@@ -1420,6 +1842,14 @@ app.post("/api/admin/users/:id/recharge", async (c) => {
   const externalNoteMigrationCheck = await requireRechargeExternalNoteColumn(c);
   if (!externalNoteMigrationCheck.ok) {
     return externalNoteMigrationCheck.response;
+  }
+  const refundMigrationCheck = await requireRechargeRefundColumns(c);
+  if (!refundMigrationCheck.ok) {
+    return refundMigrationCheck.response;
+  }
+  const referralMigrationCheck = await requireReferralTables(c);
+  if (!referralMigrationCheck.ok) {
+    return referralMigrationCheck.response;
   }
 
   const body = await c.req.json<Partial<AdminRechargeUserRequestDTO>>().catch(() => null);
@@ -1461,6 +1891,16 @@ app.post("/api/admin/users/:id/recharge", async (c) => {
       return fail(c, 404, "user not found");
     }
 
+    try {
+      await applyReferralEffectsForRecharge(c, {
+        userId,
+        recharge: payload,
+        occurredAt: now
+      });
+    } catch (error) {
+      console.error("apply referral effect after recharge failed", error);
+    }
+
     return ok(c, payload);
   } catch (error) {
     console.error("recharge failed", error);
@@ -1481,6 +1921,14 @@ app.post("/api/admin/users/:id/recharge/backfill", async (c) => {
   const externalNoteMigrationCheck = await requireRechargeExternalNoteColumn(c);
   if (!externalNoteMigrationCheck.ok) {
     return externalNoteMigrationCheck.response;
+  }
+  const refundMigrationCheck = await requireRechargeRefundColumns(c);
+  if (!refundMigrationCheck.ok) {
+    return refundMigrationCheck.response;
+  }
+  const referralMigrationCheck = await requireReferralTables(c);
+  if (!referralMigrationCheck.ok) {
+    return referralMigrationCheck.response;
   }
 
   const body = await c.req.json<Partial<AdminBackfillRechargeRequestDTO>>().catch(() => null);
@@ -1529,10 +1977,179 @@ app.post("/api/admin/users/:id/recharge/backfill", async (c) => {
       return fail(c, 404, "user not found");
     }
 
+    try {
+      await applyReferralEffectsForRecharge(c, {
+        userId,
+        recharge: payload,
+        occurredAt: now
+      });
+    } catch (error) {
+      console.error("apply referral effect after backfill failed", error);
+    }
+
     return ok(c, payload);
   } catch (error) {
     console.error("recharge backfill failed", error);
     return fail(c, 500, "failed to backfill recharge record");
+  }
+});
+
+app.post("/api/admin/recharge-records/:id/refund", async (c) => {
+  const rechargeRecordId = c.req.param("id")?.trim();
+  if (!rechargeRecordId) {
+    return fail(c, 400, "recharge record id is required");
+  }
+
+  const timelineMigrationCheck = await requireRechargeTimelineColumns(c);
+  if (!timelineMigrationCheck.ok) {
+    return timelineMigrationCheck.response;
+  }
+  const externalNoteMigrationCheck = await requireRechargeExternalNoteColumn(c);
+  if (!externalNoteMigrationCheck.ok) {
+    return externalNoteMigrationCheck.response;
+  }
+  const refundMigrationCheck = await requireRechargeRefundColumns(c);
+  if (!refundMigrationCheck.ok) {
+    return refundMigrationCheck.response;
+  }
+  const referralMigrationCheck = await requireReferralTables(c);
+  if (!referralMigrationCheck.ok) {
+    return referralMigrationCheck.response;
+  }
+
+  const body = await c.req
+    .json<Partial<AdminRefundRechargeRequestDTO>>()
+    .catch(() => null);
+  const refundAmount = normalizePaymentAmount(body?.refundAmount);
+  const refundNote = normalizeInternalNote(body?.refundNote);
+  if (refundNote && refundNote.length > MAX_REFUND_NOTE_LENGTH) {
+    return fail(c, 400, `refundNote must be <= ${MAX_REFUND_NOTE_LENGTH} chars`);
+  }
+
+  const target = await c.env.DB
+    .prepare(
+      `SELECT
+        r.id,
+        r.user_id,
+        u.username,
+        r.reason,
+        r.source,
+        r.change_days,
+        r.payment_amount_cents,
+        r.refunded_at
+       FROM recharge_records AS r
+       INNER JOIN users AS u ON u.id = r.user_id
+       WHERE r.id = ?
+       LIMIT 1`
+    )
+    .bind(rechargeRecordId)
+    .first<RechargeRefundTargetWithUserRow>();
+  if (!target) {
+    return fail(c, 404, "recharge record not found");
+  }
+  if (target.refunded_at && target.refunded_at > 0) {
+    return fail(c, 409, "recharge record already refunded");
+  }
+  if ((target.change_days || 0) <= 0) {
+    return fail(c, 400, "only positive recharge records can be refunded");
+  }
+  if (target.source === RechargeRecordSource.REFUND_ROLLBACK) {
+    return fail(c, 400, "refund rollback records cannot be refunded again");
+  }
+
+  const originalPaymentAmount = toPaymentAmount(target.payment_amount_cents);
+  const resolvedRefundAmount = refundAmount ?? originalPaymentAmount;
+  if (
+    resolvedRefundAmount < 0 ||
+    resolvedRefundAmount > originalPaymentAmount
+  ) {
+    return fail(
+      c,
+      400,
+      `refundAmount must be between 0 and ${originalPaymentAmount.toFixed(2)}`
+    );
+  }
+
+  const now = getCurrentTimestamp();
+  const session = c.get("adminSession");
+  const markResult = await c.env.DB
+    .prepare(
+      `UPDATE recharge_records
+       SET refunded_at = ?, refund_note = ?, refunded_by_admin_id = ?, refund_amount_cents = ?
+       WHERE id = ? AND refunded_at IS NULL`
+    )
+    .bind(
+      now,
+      refundNote,
+      session.adminId,
+      toPaymentAmountCents(resolvedRefundAmount),
+      rechargeRecordId
+    )
+    .run();
+  if (Number(markResult.meta?.changes || 0) === 0) {
+    return fail(c, 409, "recharge record already refunded");
+  }
+
+  try {
+    const rollbackPayload = await createAndRebuildRechargeRecord(c, {
+      userId: target.user_id,
+      days: -Math.abs(target.change_days),
+      reason: RechargeReason.MANUAL_FIX,
+      paymentAmountCents: 0,
+      internalNote: `refund rollback for recharge record ${rechargeRecordId}`,
+      externalNote: "退款回滚会员天数",
+      occurredAt: now,
+      source: RechargeRecordSource.REFUND_ROLLBACK
+    });
+    if (!rollbackPayload) {
+      return fail(c, 404, "target user not found");
+    }
+
+    await cancelReferralRewardsByRechargeRecord(c.env.DB, {
+      rechargeRecordId,
+      reason: "recharge refunded",
+      now
+    });
+
+    const bonusGrant = await findGrantedBonusByTriggerRechargeRecord(
+      c.env.DB,
+      rechargeRecordId
+    );
+    if (bonusGrant) {
+      const bonusRollback = await createAndRebuildRechargeRecord(c, {
+        userId: bonusGrant.invitee_user_id,
+        days: -Math.abs(bonusGrant.bonus_days),
+        reason: RechargeReason.MANUAL_FIX,
+        paymentAmountCents: 0,
+        internalNote: `revoke invite bonus for refunded recharge ${rechargeRecordId}`,
+        externalNote: "退款撤销邀请首单赠送",
+        occurredAt: now,
+        source: RechargeRecordSource.REFUND_ROLLBACK
+      });
+
+      if (bonusRollback) {
+        await markBonusGrantRevoked(c.env.DB, {
+          bonusGrantId: bonusGrant.id,
+          revokeRechargeRecordId: bonusRollback.record.id,
+          now
+        });
+      }
+    }
+
+    const originalRecord = await getRechargeRecordById(c.env.DB, rechargeRecordId);
+    if (!originalRecord) {
+      return fail(c, 500, "refunded recharge record not found");
+    }
+
+    const payload: AdminRefundRechargeResponseDTO = {
+      user: rollbackPayload.user,
+      originalRecord: toAdminRechargeRecordDTO(originalRecord),
+      refundRecord: rollbackPayload.record
+    };
+    return ok(c, payload);
+  } catch (error) {
+    console.error("refund recharge failed", error);
+    return fail(c, 500, "failed to refund recharge record");
   }
 });
 
@@ -1666,9 +2283,22 @@ app.get("/api/admin/recharge-records", async (c) => {
       : DEFAULT_RECHARGE_RECORD_LIMIT;
   const hasRechargeTimeline = await hasRechargeTimelineColumns(c.env.DB);
   const hasRechargeExternalNote = await hasRechargeExternalNoteColumn(c.env.DB);
+  const hasRechargeRefund = await hasRechargeRefundColumns(c.env.DB);
   const externalNoteSelect = hasRechargeExternalNote
     ? "r.external_note AS external_note"
     : "NULL AS external_note";
+  const refundedAtSelect = hasRechargeRefund
+    ? "r.refunded_at AS refunded_at"
+    : "NULL AS refunded_at";
+  const refundedByAdminIdSelect = hasRechargeRefund
+    ? "r.refunded_by_admin_id AS refunded_by_admin_id"
+    : "NULL AS refunded_by_admin_id";
+  const refundAmountSelect = hasRechargeRefund
+    ? "r.refund_amount_cents AS refund_amount_cents"
+    : "0 AS refund_amount_cents";
+  const refundNoteSelect = hasRechargeRefund
+    ? "r.refund_note AS refund_note"
+    : "NULL AS refund_note";
   const rows = hasRechargeTimeline
     ? await c.env.DB.prepare(
       `SELECT
@@ -1687,6 +2317,10 @@ app.get("/api/admin/recharge-records", async (c) => {
         r.occurred_at,
         r.recorded_at,
         r.source,
+        ${refundedAtSelect},
+        ${refundedByAdminIdSelect},
+        ${refundAmountSelect},
+        ${refundNoteSelect},
         r.created_at
       FROM recharge_records AS r
       INNER JOIN users AS u ON u.id = r.user_id
@@ -1713,6 +2347,10 @@ app.get("/api/admin/recharge-records", async (c) => {
         NULL AS occurred_at,
         NULL AS recorded_at,
         'normal' AS source,
+        NULL AS refunded_at,
+        NULL AS refunded_by_admin_id,
+        0 AS refund_amount_cents,
+        NULL AS refund_note,
         r.created_at
       FROM recharge_records AS r
       INNER JOIN users AS u ON u.id = r.user_id
@@ -1728,6 +2366,224 @@ app.get("/api/admin/recharge-records", async (c) => {
     limit
   };
 
+  return ok(c, payload);
+});
+
+app.get("/api/admin/referral/dashboard", async (c) => {
+  const referralCheck = await requireReferralTables(c);
+  if (!referralCheck.ok) {
+    return referralCheck.response;
+  }
+
+  const payload: AdminReferralDashboardDTO = await getReferralDashboard(c.env.DB);
+  return ok(c, payload);
+});
+
+app.post("/api/admin/referral-rewards/unlock", async (c) => {
+  const referralCheck = await requireReferralTables(c);
+  if (!referralCheck.ok) {
+    return referralCheck.response;
+  }
+
+  const now = getCurrentTimestamp();
+  const changed = await unlockPendingReferralRewards(c.env.DB, now);
+  return ok(c, { changed, executedAt: now });
+});
+
+app.get("/api/admin/referral-rewards", async (c) => {
+  const referralCheck = await requireReferralTables(c);
+  if (!referralCheck.ok) {
+    return referralCheck.response;
+  }
+
+  const rawLimit = Number(c.req.query("limit"));
+  const limit =
+    Number.isInteger(rawLimit) && rawLimit > 0
+      ? Math.min(rawLimit, MAX_RECHARGE_RECORD_LIMIT)
+      : DEFAULT_RECHARGE_RECORD_LIMIT;
+  const statusRaw = (c.req.query("status") || "all").trim();
+  const status =
+    statusRaw === "all" ||
+    statusRaw === ReferralRewardStatus.PENDING ||
+    statusRaw === ReferralRewardStatus.AVAILABLE ||
+    statusRaw === ReferralRewardStatus.CANCELED ||
+    statusRaw === ReferralRewardStatus.WITHDRAWN
+      ? statusRaw
+      : null;
+  if (!status) {
+    return fail(c, 400, "invalid referral reward status");
+  }
+
+  const rows =
+    status === "all"
+      ? await c.env.DB
+        .prepare(
+          `SELECT
+            l.id,
+            l.inviter_user_id,
+            inviter.username AS inviter_username,
+            l.invitee_user_id,
+            invitee.username AS invitee_username,
+            l.recharge_record_id,
+            l.recharge_reason,
+            l.recharge_source,
+            l.payment_amount_cents,
+            l.reward_rate_bps,
+            l.reward_amount_cents,
+            l.status,
+            l.unlock_at,
+            l.available_at,
+            l.canceled_at,
+            l.canceled_reason,
+            l.withdrawn_at,
+            l.withdrawal_id,
+            l.created_at,
+            l.updated_at
+           FROM referral_reward_ledger AS l
+           INNER JOIN users AS inviter ON inviter.id = l.inviter_user_id
+           INNER JOIN users AS invitee ON invitee.id = l.invitee_user_id
+           ORDER BY l.created_at DESC, l.id DESC
+           LIMIT ?`
+        )
+        .bind(limit)
+        .all<ReferralRewardLedgerRow>()
+      : await c.env.DB
+        .prepare(
+          `SELECT
+            l.id,
+            l.inviter_user_id,
+            inviter.username AS inviter_username,
+            l.invitee_user_id,
+            invitee.username AS invitee_username,
+            l.recharge_record_id,
+            l.recharge_reason,
+            l.recharge_source,
+            l.payment_amount_cents,
+            l.reward_rate_bps,
+            l.reward_amount_cents,
+            l.status,
+            l.unlock_at,
+            l.available_at,
+            l.canceled_at,
+            l.canceled_reason,
+            l.withdrawn_at,
+            l.withdrawal_id,
+            l.created_at,
+            l.updated_at
+           FROM referral_reward_ledger AS l
+           INNER JOIN users AS inviter ON inviter.id = l.inviter_user_id
+           INNER JOIN users AS invitee ON invitee.id = l.invitee_user_id
+           WHERE l.status = ?
+           ORDER BY l.created_at DESC, l.id DESC
+           LIMIT ?`
+        )
+        .bind(status, limit)
+        .all<ReferralRewardLedgerRow>();
+
+  const payload: AdminListReferralRewardsResponseDTO = {
+    items: (rows.results || []).map((row) => toAdminReferralRewardRecordDTO(row)),
+    limit,
+    status
+  };
+  return ok(c, payload);
+});
+
+app.get("/api/admin/referral-withdrawals", async (c) => {
+  const referralCheck = await requireReferralTables(c);
+  if (!referralCheck.ok) {
+    return referralCheck.response;
+  }
+
+  const rawLimit = Number(c.req.query("limit"));
+  const limit =
+    Number.isInteger(rawLimit) && rawLimit > 0
+      ? Math.min(rawLimit, MAX_RECHARGE_RECORD_LIMIT)
+      : DEFAULT_RECHARGE_RECORD_LIMIT;
+  const rows = await c.env.DB
+    .prepare(
+      `SELECT
+        w.id,
+        w.inviter_user_id,
+        inviter.username AS inviter_username,
+        w.amount_cents,
+        w.processed_by_admin_id,
+        admin.username AS processed_by_admin_username,
+        w.note,
+        w.created_at
+       FROM referral_withdrawals AS w
+       INNER JOIN users AS inviter ON inviter.id = w.inviter_user_id
+       INNER JOIN admin_users AS admin ON admin.id = w.processed_by_admin_id
+       ORDER BY w.created_at DESC, w.id DESC
+       LIMIT ?`
+    )
+    .bind(limit)
+    .all<ReferralWithdrawalRow>();
+
+  const payload: AdminListReferralWithdrawalsResponseDTO = {
+    items: (rows.results || []).map((row) => toAdminReferralWithdrawalDTO(row)),
+    limit
+  };
+  return ok(c, payload);
+});
+
+app.post("/api/admin/referral-withdrawals", async (c) => {
+  const referralCheck = await requireReferralTables(c);
+  if (!referralCheck.ok) {
+    return referralCheck.response;
+  }
+
+  const body = await c.req
+    .json<Partial<AdminWithdrawReferralRewardsRequestDTO>>()
+    .catch(() => null);
+  const inviterUserId =
+    typeof body?.inviterUserId === "string" ? body.inviterUserId.trim() : "";
+  if (!inviterUserId) {
+    return fail(c, 400, "inviterUserId is required");
+  }
+  const note = normalizeWithdrawNote(body?.note);
+  if (note && note.length > MAX_WITHDRAW_NOTE_LENGTH) {
+    return fail(c, 400, `note must be <= ${MAX_WITHDRAW_NOTE_LENGTH} chars`);
+  }
+
+  const now = getCurrentTimestamp();
+  const withdrawResult = await withdrawAvailableReferralRewards(c.env.DB, {
+    inviterUserId,
+    processedByAdminId: c.get("adminSession").adminId,
+    note,
+    now
+  });
+  if (!withdrawResult) {
+    return fail(c, 400, "no available referral rewards to withdraw");
+  }
+
+  const withdrawal = await c.env.DB
+    .prepare(
+      `SELECT
+        w.id,
+        w.inviter_user_id,
+        inviter.username AS inviter_username,
+        w.amount_cents,
+        w.processed_by_admin_id,
+        admin.username AS processed_by_admin_username,
+        w.note,
+        w.created_at
+       FROM referral_withdrawals AS w
+       INNER JOIN users AS inviter ON inviter.id = w.inviter_user_id
+       INNER JOIN admin_users AS admin ON admin.id = w.processed_by_admin_id
+       WHERE w.id = ?
+       LIMIT 1`
+    )
+    .bind(withdrawResult.withdrawalId)
+    .first<ReferralWithdrawalRow>();
+  if (!withdrawal) {
+    return fail(c, 500, "withdrawal record not found");
+  }
+
+  const payload: AdminWithdrawReferralRewardsResponseDTO = {
+    withdrawal: toAdminReferralWithdrawalDTO(withdrawal),
+    withdrawnCount: withdrawResult.withdrawnCount,
+    withdrawnAmount: toPaymentAmount(withdrawResult.withdrawnAmountCents)
+  };
   return ok(c, payload);
 });
 
@@ -1817,4 +2673,24 @@ app.get("/", (c) => {
   return c.text("VIP membership backend is running.");
 });
 
-export default app;
+const scheduled: ExportedHandlerScheduledHandler<Bindings> = async (
+  _event,
+  env,
+  _ctx
+) => {
+  const hasTables = await hasReferralTables(env.DB);
+  if (!hasTables) {
+    return;
+  }
+
+  try {
+    await unlockPendingReferralRewards(env.DB, getCurrentTimestamp());
+  } catch (error) {
+    console.error("scheduled unlock pending referral rewards failed", error);
+  }
+};
+
+export default {
+  fetch: app.fetch,
+  scheduled
+};

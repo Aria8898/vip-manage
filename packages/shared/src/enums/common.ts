@@ -15,11 +15,26 @@ export enum RechargeReason {
 
 export enum RechargeRecordSource {
   NORMAL = "normal",
-  BACKFILL = "backfill"
+  BACKFILL = "backfill",
+  SYSTEM_BONUS = "system_bonus",
+  REFUND_ROLLBACK = "refund_rollback"
 }
 
 export enum UserProfileChangeField {
   SYSTEM_EMAIL = "systemEmail",
   FAMILY_GROUP_NAME = "familyGroupName",
   USER_EMAIL = "userEmail"
+}
+
+export enum ReferralRewardStatus {
+  PENDING = "pending",
+  AVAILABLE = "available",
+  CANCELED = "canceled",
+  WITHDRAWN = "withdrawn"
+}
+
+export enum ReferralBonusStatus {
+  PENDING = "pending",
+  GRANTED = "granted",
+  REVOKED = "revoked"
 }

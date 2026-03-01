@@ -10,3 +10,6 @@ binding = "DB"
 database_name = "vip-membership-db"
 database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
 migrations_dir = "migrations"
+
+[triggers]
+crons = ["*/10 * * * *"]
