@@ -278,8 +278,27 @@ export interface UserStatusDTO extends UserSummaryDTO {
   userEmail: string | null;
 }
 
+export interface UserInviteeRewardSummaryDTO {
+  inviteeUserId: string;
+  inviteeUsername: string;
+  pendingRewardAmount: number;
+  availableRewardAmount: number;
+  withdrawnRewardAmount: number;
+  totalRewardAmount: number;
+}
+
+export interface UserReferralSummaryDTO {
+  inviteeCount: number;
+  pendingRewardAmount: number;
+  availableRewardAmount: number;
+  withdrawnRewardAmount: number;
+  totalRewardAmount: number;
+  invitees: UserInviteeRewardSummaryDTO[];
+}
+
 export interface UserStatusResponseDTO {
   user: UserStatusDTO;
   history: UserStatusHistoryRecordDTO[];
+  referral: UserReferralSummaryDTO;
   now: number;
 }

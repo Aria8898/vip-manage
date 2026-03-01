@@ -109,6 +109,8 @@ const formatUnixSeconds = (value: number) => {
   });
 };
 
+const formatCurrency = (value: number): string => `¥${value.toFixed(2)}`;
+
 const getHistoryReasonVisual = (
   reason: RechargeReason,
 ): HistoryReasonVisualConfig =>
@@ -237,6 +239,87 @@ export const StatusShellPage = () => {
                   已使用 {statusData.user.usedDays} 天
                 </Typography.Text>
               </Space>
+            </Card>
+
+            <Card size="small" title="邀请奖励">
+              <Space
+                wrap
+                size={[24, 16]}
+                style={{ width: "100%", marginBottom: 12 }}
+              >
+                <Statistic
+                  title="已邀请人数"
+                  value={statusData.referral.inviteeCount}
+                  suffix="人"
+                />
+                <Statistic
+                  title="预计奖励"
+                  value={statusData.referral.pendingRewardAmount}
+                  precision={2}
+                  prefix="¥"
+                />
+                <Statistic
+                  title="可提现"
+                  value={statusData.referral.availableRewardAmount}
+                  precision={2}
+                  prefix="¥"
+                />
+                <Statistic
+                  title="已提现"
+                  value={statusData.referral.withdrawnRewardAmount}
+                  precision={2}
+                  prefix="¥"
+                />
+              </Space>
+              <Typography.Text type="secondary" style={{ display: "block" }}>
+                结算说明：单笔充值到期后预计奖励转为可提现；若该笔发生退款，奖励会失效。
+              </Typography.Text>
+
+              {statusData.referral.invitees.length > 0 ? (
+                <Space
+                  direction="vertical"
+                  size={8}
+                  style={{ width: "100%", marginTop: 12 }}
+                >
+                  {statusData.referral.invitees.map((invitee) => (
+                    <Card
+                      key={invitee.inviteeUserId}
+                      size="small"
+                      style={{ backgroundColor: "#fafafa" }}
+                    >
+                      <Space
+                        direction="vertical"
+                        size={4}
+                        style={{ width: "100%" }}
+                      >
+                        <Typography.Text strong>
+                          {invitee.inviteeUsername}
+                        </Typography.Text>
+                        <Space wrap size={8}>
+                          <Tag color="orange">
+                            预计 {formatCurrency(invitee.pendingRewardAmount)}
+                          </Tag>
+                          <Tag color="green">
+                            可提现 {formatCurrency(invitee.availableRewardAmount)}
+                          </Tag>
+                          <Tag color="blue">
+                            已提现 {formatCurrency(invitee.withdrawnRewardAmount)}
+                          </Tag>
+                          <Tag>
+                            累计 {formatCurrency(invitee.totalRewardAmount)}
+                          </Tag>
+                        </Space>
+                      </Space>
+                    </Card>
+                  ))}
+                </Space>
+              ) : (
+                <Empty
+                  style={{ marginTop: 12 }}
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description="暂无邀请奖励记录"
+                />
+              )}
             </Card>
 
             {isExpiringSoon ? (

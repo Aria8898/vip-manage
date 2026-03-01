@@ -240,6 +240,25 @@ interface UserTotalChangeDaysRow {
   total_change_days: number | string | null;
 }
 
+interface UserReferralSummaryRow {
+  pending_amount_cents: number | string | null;
+  available_amount_cents: number | string | null;
+  withdrawn_amount_cents: number | string | null;
+}
+
+interface UserInviteeCountRow {
+  invitee_count: number | string | null;
+}
+
+interface UserInviteeRewardSummaryRow {
+  invitee_user_id: string;
+  invitee_username: string;
+  pending_amount_cents: number | string | null;
+  available_amount_cents: number | string | null;
+  withdrawn_amount_cents: number | string | null;
+  total_amount_cents: number | string | null;
+}
+
 interface RechargeRebuildRow {
   id: string;
   change_days: number;
@@ -1282,6 +1301,48 @@ app.get("/api/status/:token", async (c) => {
       .bind(user.id, DEFAULT_STATUS_HISTORY_LIMIT)
       .all<UserStatusHistoryRow>();
 
+  const referralEnabled = await hasReferralTables(c.env.DB);
+  const inviteeCountRow = referralEnabled
+    ? await c.env.DB.prepare(
+      `SELECT COUNT(*) AS invitee_count
+       FROM user_referrals
+       WHERE inviter_user_id = ?`
+    )
+      .bind(user.id)
+      .first<UserInviteeCountRow>()
+    : null;
+  const referralSummaryRow = referralEnabled
+    ? await c.env.DB.prepare(
+      `SELECT
+        COALESCE(SUM(CASE WHEN status = '${ReferralRewardStatus.PENDING}' THEN reward_amount_cents ELSE 0 END), 0) AS pending_amount_cents,
+        COALESCE(SUM(CASE WHEN status = '${ReferralRewardStatus.AVAILABLE}' THEN reward_amount_cents ELSE 0 END), 0) AS available_amount_cents,
+        COALESCE(SUM(CASE WHEN status = '${ReferralRewardStatus.WITHDRAWN}' THEN reward_amount_cents ELSE 0 END), 0) AS withdrawn_amount_cents
+       FROM referral_reward_ledger
+       WHERE inviter_user_id = ?`
+    )
+      .bind(user.id)
+      .first<UserReferralSummaryRow>()
+    : null;
+  const inviteeRewardRows = referralEnabled
+    ? await c.env.DB.prepare(
+      `SELECT
+        l.invitee_user_id,
+        u.username AS invitee_username,
+        COALESCE(SUM(CASE WHEN l.status = '${ReferralRewardStatus.PENDING}' THEN l.reward_amount_cents ELSE 0 END), 0) AS pending_amount_cents,
+        COALESCE(SUM(CASE WHEN l.status = '${ReferralRewardStatus.AVAILABLE}' THEN l.reward_amount_cents ELSE 0 END), 0) AS available_amount_cents,
+        COALESCE(SUM(CASE WHEN l.status = '${ReferralRewardStatus.WITHDRAWN}' THEN l.reward_amount_cents ELSE 0 END), 0) AS withdrawn_amount_cents,
+        COALESCE(SUM(CASE WHEN l.status != '${ReferralRewardStatus.CANCELED}' THEN l.reward_amount_cents ELSE 0 END), 0) AS total_amount_cents
+       FROM referral_reward_ledger AS l
+       INNER JOIN users AS u ON u.id = l.invitee_user_id
+       WHERE l.inviter_user_id = ?
+       GROUP BY l.invitee_user_id, u.username
+       ORDER BY total_amount_cents DESC, l.invitee_user_id ASC
+       LIMIT 50`
+    )
+      .bind(user.id)
+      .all<UserInviteeRewardSummaryRow>()
+    : { results: [] };
+
   const now = getCurrentTimestamp();
   const remainingDays =
     user.expire_at > now
@@ -1305,6 +1366,25 @@ app.get("/api/status/:token", async (c) => {
     history: (historyRows.results || []).map((row) =>
       toUserStatusHistoryRecordDTO(row)
     ),
+    referral: {
+      inviteeCount: Number(inviteeCountRow?.invitee_count || 0),
+      pendingRewardAmount: toPaymentAmount(Number(referralSummaryRow?.pending_amount_cents || 0)),
+      availableRewardAmount: toPaymentAmount(Number(referralSummaryRow?.available_amount_cents || 0)),
+      withdrawnRewardAmount: toPaymentAmount(Number(referralSummaryRow?.withdrawn_amount_cents || 0)),
+      totalRewardAmount: toPaymentAmount(
+        Number(referralSummaryRow?.pending_amount_cents || 0) +
+        Number(referralSummaryRow?.available_amount_cents || 0) +
+        Number(referralSummaryRow?.withdrawn_amount_cents || 0)
+      ),
+      invitees: (inviteeRewardRows.results || []).map((row) => ({
+        inviteeUserId: row.invitee_user_id,
+        inviteeUsername: row.invitee_username,
+        pendingRewardAmount: toPaymentAmount(Number(row.pending_amount_cents || 0)),
+        availableRewardAmount: toPaymentAmount(Number(row.available_amount_cents || 0)),
+        withdrawnRewardAmount: toPaymentAmount(Number(row.withdrawn_amount_cents || 0)),
+        totalRewardAmount: toPaymentAmount(Number(row.total_amount_cents || 0))
+      }))
+    },
     now
   };
 
