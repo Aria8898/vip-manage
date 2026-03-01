@@ -19,11 +19,13 @@ import {
   Button,
   Card,
   Col,
+  DatePicker,
   Form,
   Input,
   InputNumber,
   Modal,
   Popconfirm,
+  Radio,
   Row,
   Select,
   Space,
@@ -47,7 +49,9 @@ interface CreateUserFormValues {
 }
 
 interface RechargeFormValues {
-  days: number;
+  mode: RechargeInputMode;
+  days?: number;
+  dateRange?: RechargeDateRangeValue;
   reason: RechargeReason;
   paymentAmount: number;
   internalNote?: string;
@@ -55,7 +59,9 @@ interface RechargeFormValues {
 }
 
 interface BackfillFormValues {
-  days: number;
+  mode: RechargeInputMode;
+  days?: number;
+  dateRange?: RechargeDateRangeValue;
   reason: RechargeReason;
   paymentAmount: number;
   occurredAtInput: string;
@@ -91,11 +97,38 @@ const RECHARGE_SOURCE_LABELS: Record<RechargeRecordSource, string> = {
 const MAX_INTERNAL_NOTE_LENGTH = 200;
 const MAX_EXTERNAL_NOTE_LENGTH = 200;
 const MAX_PROFILE_CHANGE_NOTE_LENGTH = 200;
+const MAX_RECHARGE_DAYS = 3650;
+const SECONDS_PER_DAY = 24 * 60 * 60;
+
+type RechargeInputMode = "days" | "dateRange";
+type RechargeDateValue = {
+  year: () => number;
+  month: () => number;
+  date: () => number;
+};
+type RechargeDateRangeValue = [RechargeDateValue, RechargeDateValue];
 
 const PROFILE_FIELD_LABELS: Record<UserProfileChangeField, string> = {
   [UserProfileChangeField.SYSTEM_EMAIL]: "系统邮箱",
   [UserProfileChangeField.FAMILY_GROUP_NAME]: "家庭组名称",
   [UserProfileChangeField.USER_EMAIL]: "用户邮箱"
+};
+
+const calculateDateRangeRechargeDays = (range?: RechargeDateRangeValue): number | null => {
+  if (!range || range.length !== 2) {
+    return null;
+  }
+
+  const [start, end] = range;
+  const startUtcSeconds = Date.UTC(start.year(), start.month(), start.date()) / 1000;
+  const endUtcSeconds = Date.UTC(end.year(), end.month(), end.date()) / 1000;
+  const diffSeconds = endUtcSeconds - startUtcSeconds;
+
+  if (diffSeconds <= 0 || diffSeconds % SECONDS_PER_DAY !== 0) {
+    return null;
+  }
+
+  return diffSeconds / SECONDS_PER_DAY;
 };
 
 export const AdminShellPage = () => {
@@ -132,6 +165,18 @@ export const AdminShellPage = () => {
   const [submittingBackfill, setSubmittingBackfill] = useState(false);
   const [backfillTargetUser, setBackfillTargetUser] = useState<AdminUserDTO | null>(null);
   const [resettingTokenUserId, setResettingTokenUserId] = useState("");
+  const rechargeMode = Form.useWatch("mode", rechargeForm) ?? "dateRange";
+  const rechargeDateRange = Form.useWatch("dateRange", rechargeForm);
+  const backfillMode = Form.useWatch("mode", backfillForm) ?? "dateRange";
+  const backfillDateRange = Form.useWatch("dateRange", backfillForm);
+  const rechargeRangeDays = useMemo(
+    () => calculateDateRangeRechargeDays(rechargeDateRange),
+    [rechargeDateRange]
+  );
+  const backfillRangeDays = useMemo(
+    () => calculateDateRangeRechargeDays(backfillDateRange),
+    [backfillDateRange]
+  );
 
   const loadUsers = useCallback(async (query: string) => {
     setLoadingUsers(true);
@@ -466,7 +511,9 @@ export const AdminShellPage = () => {
     setRechargeTargetUser(user);
     setRechargeModalOpen(true);
     rechargeForm.setFieldsValue({
+      mode: "dateRange",
       days: 30,
+      dateRange: undefined,
       reason: RechargeReason.WECHAT_PAY,
       paymentAmount: 0,
       internalNote: "",
@@ -478,7 +525,9 @@ export const AdminShellPage = () => {
     setBackfillTargetUser(user);
     setBackfillModalOpen(true);
     backfillForm.setFieldsValue({
+      mode: "dateRange",
       days: 30,
+      dateRange: undefined,
       reason: RechargeReason.WECHAT_PAY,
       paymentAmount: 0,
       occurredAtInput: toLocalDateTimeInput(Math.floor(Date.now() / 1000)),
@@ -516,13 +565,25 @@ export const AdminShellPage = () => {
 
     try {
       const values = await rechargeForm.validateFields();
+      const resolvedDays =
+        values.mode === "dateRange" ? calculateDateRangeRechargeDays(values.dateRange) : values.days;
+      if (
+        typeof resolvedDays !== "number" ||
+        !Number.isInteger(resolvedDays) ||
+        resolvedDays <= 0 ||
+        resolvedDays > MAX_RECHARGE_DAYS
+      ) {
+        messageApi.error(`充值天数必须在 1 到 ${MAX_RECHARGE_DAYS} 之间`);
+        return;
+      }
+
       setSubmittingRecharge(true);
       const response = await apiRequest<AdminRechargeUserResponseDTO>(
         `/admin/users/${encodeURIComponent(rechargeTargetUser.id)}/recharge`,
         {
           method: "POST",
           body: JSON.stringify({
-            days: values.days,
+            days: resolvedDays,
             reason: values.reason,
             paymentAmount: values.paymentAmount,
             internalNote: values.internalNote?.trim() || undefined,
@@ -553,6 +614,18 @@ export const AdminShellPage = () => {
 
     try {
       const values = await backfillForm.validateFields();
+      const resolvedDays =
+        values.mode === "dateRange" ? calculateDateRangeRechargeDays(values.dateRange) : values.days;
+      if (
+        typeof resolvedDays !== "number" ||
+        !Number.isInteger(resolvedDays) ||
+        resolvedDays <= 0 ||
+        resolvedDays > MAX_RECHARGE_DAYS
+      ) {
+        messageApi.error(`补录天数必须在 1 到 ${MAX_RECHARGE_DAYS} 之间`);
+        return;
+      }
+
       const occurredAt = parseLocalDateTimeInput(values.occurredAtInput);
       if (!occurredAt) {
         messageApi.error("发生时间格式无效");
@@ -565,7 +638,7 @@ export const AdminShellPage = () => {
         {
           method: "POST",
           body: JSON.stringify({
-            days: values.days,
+            days: resolvedDays,
             reason: values.reason,
             paymentAmount: values.paymentAmount,
             occurredAt,
@@ -1224,17 +1297,78 @@ export const AdminShellPage = () => {
 
           <Form<RechargeFormValues> layout="vertical" form={rechargeForm}>
             <Form.Item
-              label="充值天数"
-              name="days"
+              label="充值方式"
+              name="mode"
               rules={[
                 {
                   required: true,
-                  message: "请输入充值天数"
+                  message: "请选择充值方式"
                 }
               ]}
             >
-              <InputNumber min={1} max={3650} precision={0} style={{ width: "100%" }} placeholder="例如：30" />
+              <Radio.Group
+                options={[
+                  { label: "按天数", value: "days" },
+                  { label: "按日期区间", value: "dateRange" }
+                ]}
+                optionType="button"
+                buttonStyle="solid"
+              />
             </Form.Item>
+            {rechargeMode === "days" ? (
+              <Form.Item
+                label="充值天数"
+                name="days"
+                preserve={false}
+                rules={[
+                  {
+                    required: true,
+                    message: "请输入充值天数"
+                  }
+                ]}
+              >
+                <InputNumber
+                  min={1}
+                  max={MAX_RECHARGE_DAYS}
+                  precision={0}
+                  style={{ width: "100%" }}
+                  placeholder="例如：30"
+                />
+              </Form.Item>
+            ) : (
+              <Form.Item
+                label="充值日期区间"
+                name="dateRange"
+                preserve={false}
+                rules={[
+                  {
+                    required: true,
+                    message: "请选择日期区间"
+                  },
+                  {
+                    validator: (_, value: RechargeDateRangeValue | undefined) => {
+                      const days = calculateDateRangeRechargeDays(value);
+                      if (!days) {
+                        return Promise.reject(new Error("结束日期必须晚于开始日期"));
+                      }
+                      if (days > MAX_RECHARGE_DAYS) {
+                        return Promise.reject(new Error(`最多支持 ${MAX_RECHARGE_DAYS} 天`));
+                      }
+                      return Promise.resolve();
+                    }
+                  }
+                ]}
+              >
+                <DatePicker.RangePicker style={{ width: "100%" }} format="YYYY/MM/DD" />
+              </Form.Item>
+            )}
+            {rechargeMode === "dateRange" ? (
+              <Typography.Text type={rechargeRangeDays ? "success" : "secondary"}>
+                {rechargeRangeDays
+                  ? `将充值 ${rechargeRangeDays} 天（含开始日，不含结束日）`
+                  : "按开始日 00:00 至结束日 00:00 计算（含开始日，不含结束日）"}
+              </Typography.Text>
+            ) : null}
             <Form.Item
               label="充值原因"
               name="reason"
@@ -1331,17 +1465,78 @@ export const AdminShellPage = () => {
               <Input type="datetime-local" />
             </Form.Item>
             <Form.Item
-              label="补录天数"
-              name="days"
+              label="补录方式"
+              name="mode"
               rules={[
                 {
                   required: true,
-                  message: "请输入补录天数"
+                  message: "请选择补录方式"
                 }
               ]}
             >
-              <InputNumber min={1} max={3650} precision={0} style={{ width: "100%" }} placeholder="例如：30" />
+              <Radio.Group
+                options={[
+                  { label: "按天数", value: "days" },
+                  { label: "按日期区间", value: "dateRange" }
+                ]}
+                optionType="button"
+                buttonStyle="solid"
+              />
             </Form.Item>
+            {backfillMode === "days" ? (
+              <Form.Item
+                label="补录天数"
+                name="days"
+                preserve={false}
+                rules={[
+                  {
+                    required: true,
+                    message: "请输入补录天数"
+                  }
+                ]}
+              >
+                <InputNumber
+                  min={1}
+                  max={MAX_RECHARGE_DAYS}
+                  precision={0}
+                  style={{ width: "100%" }}
+                  placeholder="例如：30"
+                />
+              </Form.Item>
+            ) : (
+              <Form.Item
+                label="补录日期区间"
+                name="dateRange"
+                preserve={false}
+                rules={[
+                  {
+                    required: true,
+                    message: "请选择日期区间"
+                  },
+                  {
+                    validator: (_, value: RechargeDateRangeValue | undefined) => {
+                      const days = calculateDateRangeRechargeDays(value);
+                      if (!days) {
+                        return Promise.reject(new Error("结束日期必须晚于开始日期"));
+                      }
+                      if (days > MAX_RECHARGE_DAYS) {
+                        return Promise.reject(new Error(`最多支持 ${MAX_RECHARGE_DAYS} 天`));
+                      }
+                      return Promise.resolve();
+                    }
+                  }
+                ]}
+              >
+                <DatePicker.RangePicker style={{ width: "100%" }} format="YYYY/MM/DD" />
+              </Form.Item>
+            )}
+            {backfillMode === "dateRange" ? (
+              <Typography.Text type={backfillRangeDays ? "success" : "secondary"}>
+                {backfillRangeDays
+                  ? `将补录 ${backfillRangeDays} 天（含开始日，不含结束日）`
+                  : "按开始日 00:00 至结束日 00:00 计算（含开始日，不含结束日）"}
+              </Typography.Text>
+            ) : null}
             <Form.Item
               label="补录原因"
               name="reason"
