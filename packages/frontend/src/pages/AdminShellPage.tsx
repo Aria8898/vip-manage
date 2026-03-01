@@ -13,7 +13,7 @@ import {
   type AdminRechargeUserResponseDTO,
   type AdminUpdateUserResponseDTO,
   type AdminUserDTO,
-  type AdminUserProfileChangeRecordDTO
+  type AdminUserProfileChangeRecordDTO,
 } from "@vip/shared";
 import {
   Button,
@@ -32,8 +32,9 @@ import {
   Statistic,
   Table,
   Tag,
+  Tooltip,
   Typography,
-  message
+  message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useNavigate } from "react-router-dom";
@@ -86,12 +87,12 @@ const RECHARGE_REASON_LABELS: Record<RechargeReason, string> = {
   [RechargeReason.REFERRAL_REWARD]: "推荐奖励",
   [RechargeReason.CAMPAIGN_GIFT]: "活动赠送",
   [RechargeReason.AFTER_SALES]: "售后补偿",
-  [RechargeReason.MANUAL_FIX]: "手动修正"
+  [RechargeReason.MANUAL_FIX]: "手动修正",
 };
 
 const RECHARGE_SOURCE_LABELS: Record<RechargeRecordSource, string> = {
   [RechargeRecordSource.NORMAL]: "普通充值",
-  [RechargeRecordSource.BACKFILL]: "历史补录"
+  [RechargeRecordSource.BACKFILL]: "历史补录",
 };
 
 const MAX_INTERNAL_NOTE_LENGTH = 200;
@@ -111,16 +112,19 @@ type RechargeDateRangeValue = [RechargeDateValue, RechargeDateValue];
 const PROFILE_FIELD_LABELS: Record<UserProfileChangeField, string> = {
   [UserProfileChangeField.SYSTEM_EMAIL]: "系统邮箱",
   [UserProfileChangeField.FAMILY_GROUP_NAME]: "家庭组名称",
-  [UserProfileChangeField.USER_EMAIL]: "用户邮箱"
+  [UserProfileChangeField.USER_EMAIL]: "用户邮箱",
 };
 
-const calculateDateRangeRechargeDays = (range?: RechargeDateRangeValue): number | null => {
+const calculateDateRangeRechargeDays = (
+  range?: RechargeDateRangeValue,
+): number | null => {
   if (!range || range.length !== 2) {
     return null;
   }
 
   const [start, end] = range;
-  const startUtcSeconds = Date.UTC(start.year(), start.month(), start.date()) / 1000;
+  const startUtcSeconds =
+    Date.UTC(start.year(), start.month(), start.date()) / 1000;
   const endUtcSeconds = Date.UTC(end.year(), end.month(), end.date()) / 1000;
   const diffSeconds = endUtcSeconds - startUtcSeconds;
 
@@ -129,6 +133,18 @@ const calculateDateRangeRechargeDays = (range?: RechargeDateRangeValue): number 
   }
 
   return diffSeconds / SECONDS_PER_DAY;
+};
+
+const truncateMiddle = (
+  value: string,
+  prefixLength = 4,
+  suffixLength = 4,
+): string => {
+  if (value.length <= prefixLength + suffixLength + 3) {
+    return value;
+  }
+
+  return `${value.slice(0, prefixLength)}...${value.slice(-suffixLength)}`;
 };
 
 export const AdminShellPage = () => {
@@ -149,21 +165,32 @@ export const AdminShellPage = () => {
   const [submittingCreate, setSubmittingCreate] = useState(false);
   const [copiedUserId, setCopiedUserId] = useState("");
   const [sessionErrorMessage, setSessionErrorMessage] = useState("");
-  const [dashboard, setDashboard] = useState<AdminDashboardTodayDTO | null>(null);
+  const [dashboard, setDashboard] = useState<AdminDashboardTodayDTO | null>(
+    null,
+  );
   const [loadingDashboard, setLoadingDashboard] = useState(false);
-  const [rechargeRecords, setRechargeRecords] = useState<AdminRechargeRecordDTO[]>([]);
+  const [rechargeRecords, setRechargeRecords] = useState<
+    AdminRechargeRecordDTO[]
+  >([]);
   const [loadingRechargeRecords, setLoadingRechargeRecords] = useState(false);
-  const [profileChangeLogs, setProfileChangeLogs] = useState<AdminUserProfileChangeRecordDTO[]>([]);
-  const [loadingProfileChangeLogs, setLoadingProfileChangeLogs] = useState(false);
+  const [profileChangeLogs, setProfileChangeLogs] = useState<
+    AdminUserProfileChangeRecordDTO[]
+  >([]);
+  const [loadingProfileChangeLogs, setLoadingProfileChangeLogs] =
+    useState(false);
   const [rechargeModalOpen, setRechargeModalOpen] = useState(false);
   const [submittingRecharge, setSubmittingRecharge] = useState(false);
-  const [rechargeTargetUser, setRechargeTargetUser] = useState<AdminUserDTO | null>(null);
+  const [rechargeTargetUser, setRechargeTargetUser] =
+    useState<AdminUserDTO | null>(null);
   const [updateModalOpen, setUpdateModalOpen] = useState(false);
   const [submittingUpdate, setSubmittingUpdate] = useState(false);
-  const [updateTargetUser, setUpdateTargetUser] = useState<AdminUserDTO | null>(null);
+  const [updateTargetUser, setUpdateTargetUser] = useState<AdminUserDTO | null>(
+    null,
+  );
   const [backfillModalOpen, setBackfillModalOpen] = useState(false);
   const [submittingBackfill, setSubmittingBackfill] = useState(false);
-  const [backfillTargetUser, setBackfillTargetUser] = useState<AdminUserDTO | null>(null);
+  const [backfillTargetUser, setBackfillTargetUser] =
+    useState<AdminUserDTO | null>(null);
   const [resettingTokenUserId, setResettingTokenUserId] = useState("");
   const rechargeMode = Form.useWatch("mode", rechargeForm) ?? "dateRange";
   const rechargeDateRange = Form.useWatch("dateRange", rechargeForm);
@@ -171,40 +198,53 @@ export const AdminShellPage = () => {
   const backfillDateRange = Form.useWatch("dateRange", backfillForm);
   const rechargeRangeDays = useMemo(
     () => calculateDateRangeRechargeDays(rechargeDateRange),
-    [rechargeDateRange]
+    [rechargeDateRange],
   );
   const backfillRangeDays = useMemo(
     () => calculateDateRangeRechargeDays(backfillDateRange),
-    [backfillDateRange]
+    [backfillDateRange],
   );
 
-  const loadUsers = useCallback(async (query: string) => {
-    setLoadingUsers(true);
+  const loadUsers = useCallback(
+    async (query: string) => {
+      setLoadingUsers(true);
 
-    try {
-      const response = await apiRequest<AdminListUsersResponseDTO>("/admin/users", {
-        method: "GET",
-        query: query ? { query } : undefined
-      });
-      setUsers(response.data.items);
-      setActiveQuery(response.data.query);
-    } catch (error) {
-      messageApi.error(error instanceof Error ? error.message : "加载用户列表失败");
-    } finally {
-      setLoadingUsers(false);
-    }
-  }, [messageApi]);
+      try {
+        const response = await apiRequest<AdminListUsersResponseDTO>(
+          "/admin/users",
+          {
+            method: "GET",
+            query: query ? { query } : undefined,
+          },
+        );
+        setUsers(response.data.items);
+        setActiveQuery(response.data.query);
+      } catch (error) {
+        messageApi.error(
+          error instanceof Error ? error.message : "加载用户列表失败",
+        );
+      } finally {
+        setLoadingUsers(false);
+      }
+    },
+    [messageApi],
+  );
 
   const loadDashboard = useCallback(async () => {
     setLoadingDashboard(true);
 
     try {
-      const response = await apiRequest<AdminDashboardTodayDTO>("/admin/dashboard/today", {
-        method: "GET"
-      });
+      const response = await apiRequest<AdminDashboardTodayDTO>(
+        "/admin/dashboard/today",
+        {
+          method: "GET",
+        },
+      );
       setDashboard(response.data);
     } catch (error) {
-      messageApi.error(error instanceof Error ? error.message : "加载今日概览失败");
+      messageApi.error(
+        error instanceof Error ? error.message : "加载今日概览失败",
+      );
     } finally {
       setLoadingDashboard(false);
     }
@@ -214,15 +254,20 @@ export const AdminShellPage = () => {
     setLoadingRechargeRecords(true);
 
     try {
-      const response = await apiRequest<AdminListRechargeRecordsResponseDTO>("/admin/recharge-records", {
-        method: "GET",
-        query: {
-          limit: 100
-        }
-      });
+      const response = await apiRequest<AdminListRechargeRecordsResponseDTO>(
+        "/admin/recharge-records",
+        {
+          method: "GET",
+          query: {
+            limit: 100,
+          },
+        },
+      );
       setRechargeRecords(response.data.items);
     } catch (error) {
-      messageApi.error(error instanceof Error ? error.message : "加载充值流水失败");
+      messageApi.error(
+        error instanceof Error ? error.message : "加载充值流水失败",
+      );
     } finally {
       setLoadingRechargeRecords(false);
     }
@@ -232,18 +277,21 @@ export const AdminShellPage = () => {
     setLoadingProfileChangeLogs(true);
 
     try {
-      const response = await apiRequest<AdminListUserProfileChangeLogsResponseDTO>(
-        "/admin/user-profile-change-logs",
-        {
-          method: "GET",
-          query: {
-            limit: 100
-          }
-        }
-      );
+      const response =
+        await apiRequest<AdminListUserProfileChangeLogsResponseDTO>(
+          "/admin/user-profile-change-logs",
+          {
+            method: "GET",
+            query: {
+              limit: 100,
+            },
+          },
+        );
       setProfileChangeLogs(response.data.items);
     } catch (error) {
-      messageApi.error(error instanceof Error ? error.message : "加载资料变更记录失败");
+      messageApi.error(
+        error instanceof Error ? error.message : "加载资料变更记录失败",
+      );
     } finally {
       setLoadingProfileChangeLogs(false);
     }
@@ -261,7 +309,9 @@ export const AdminShellPage = () => {
         }
       } catch (error) {
         if (!cancelled) {
-          setSessionErrorMessage(error instanceof Error ? error.message : "加载会话失败");
+          setSessionErrorMessage(
+            error instanceof Error ? error.message : "加载会话失败",
+          );
         }
       }
     };
@@ -282,7 +332,7 @@ export const AdminShellPage = () => {
 
     try {
       await apiRequest("/admin/logout", {
-        method: "POST"
+        method: "POST",
       });
       navigate("/admin/login", { replace: true });
     } catch (error) {
@@ -299,7 +349,7 @@ export const AdminShellPage = () => {
 
     return new Date(value * 1000).toLocaleString("zh-CN", {
       hour12: false,
-      timeZone: "Asia/Shanghai"
+      timeZone: "Asia/Shanghai",
     });
   }, []);
 
@@ -320,9 +370,12 @@ export const AdminShellPage = () => {
     return `¥${amount.toFixed(2)}`;
   }, []);
 
-  const formatProfileChangeField = useCallback((field: UserProfileChangeField) => {
-    return PROFILE_FIELD_LABELS[field] || field;
-  }, []);
+  const formatProfileChangeField = useCallback(
+    (field: UserProfileChangeField) => {
+      return PROFILE_FIELD_LABELS[field] || field;
+    },
+    [],
+  );
 
   const toLocalDateTimeInput = useCallback((unixSeconds: number) => {
     const date = new Date(unixSeconds * 1000);
@@ -330,14 +383,17 @@ export const AdminShellPage = () => {
     return shifted.toISOString().slice(0, 16);
   }, []);
 
-  const parseLocalDateTimeInput = useCallback((value: string): number | null => {
-    const parsedMs = Date.parse(value);
-    if (Number.isNaN(parsedMs)) {
-      return null;
-    }
+  const parseLocalDateTimeInput = useCallback(
+    (value: string): number | null => {
+      const parsedMs = Date.parse(value);
+      if (Number.isNaN(parsedMs)) {
+        return null;
+      }
 
-    return Math.floor(parsedMs / 1000);
-  }, []);
+      return Math.floor(parsedMs / 1000);
+    },
+    [],
+  );
 
   const handleSearch = async (query: string) => {
     const normalized = query.trim();
@@ -373,7 +429,7 @@ export const AdminShellPage = () => {
       userEmail: user.userEmail || undefined,
       systemEmailNote: "",
       familyGroupNameNote: "",
-      userEmailNote: ""
+      userEmailNote: "",
     });
   };
 
@@ -393,10 +449,13 @@ export const AdminShellPage = () => {
       const systemEmail = values.systemEmail?.trim().toLowerCase() || undefined;
       const familyGroupName = values.familyGroupName?.trim() || undefined;
       const userEmail = values.userEmail?.trim().toLowerCase() || undefined;
-      const systemEmailChanged = (updateTargetUser.systemEmail ?? null) !== (systemEmail ?? null);
+      const systemEmailChanged =
+        (updateTargetUser.systemEmail ?? null) !== (systemEmail ?? null);
       const familyGroupNameChanged =
-        (updateTargetUser.familyGroupName ?? null) !== (familyGroupName ?? null);
-      const userEmailChanged = (updateTargetUser.userEmail ?? null) !== (userEmail ?? null);
+        (updateTargetUser.familyGroupName ?? null) !==
+        (familyGroupName ?? null);
+      const userEmailChanged =
+        (updateTargetUser.userEmail ?? null) !== (userEmail ?? null);
 
       const systemEmailNote = values.systemEmailNote?.trim();
       const familyGroupNameNote = values.familyGroupNameNote?.trim();
@@ -419,7 +478,8 @@ export const AdminShellPage = () => {
         changeNotes[UserProfileChangeField.SYSTEM_EMAIL] = systemEmailNote;
       }
       if (familyGroupNameChanged && familyGroupNameNote) {
-        changeNotes[UserProfileChangeField.FAMILY_GROUP_NAME] = familyGroupNameNote;
+        changeNotes[UserProfileChangeField.FAMILY_GROUP_NAME] =
+          familyGroupNameNote;
       }
       if (userEmailChanged && userEmailNote) {
         changeNotes[UserProfileChangeField.USER_EMAIL] = userEmailNote;
@@ -435,19 +495,26 @@ export const AdminShellPage = () => {
             systemEmail,
             familyGroupName,
             userEmail,
-            changeNotes: Object.keys(changeNotes).length > 0 ? changeNotes : undefined
-          })
-        }
+            changeNotes:
+              Object.keys(changeNotes).length > 0 ? changeNotes : undefined,
+          }),
+        },
       );
 
       closeUpdateModal();
       await Promise.all([loadUsers(activeQuery), loadProfileChangeLogs()]);
       messageApi.success(`资料已更新：${response.data.user.username}`);
     } catch (error) {
-      if (typeof error === "object" && error !== null && "errorFields" in error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "errorFields" in error
+      ) {
         return;
       }
-      messageApi.error(error instanceof Error ? error.message : "更新用户资料失败");
+      messageApi.error(
+        error instanceof Error ? error.message : "更新用户资料失败",
+      );
     } finally {
       setSubmittingUpdate(false);
     }
@@ -465,15 +532,18 @@ export const AdminShellPage = () => {
       const userEmail = values.userEmail?.trim().toLowerCase() || undefined;
 
       setSubmittingCreate(true);
-      const response = await apiRequest<AdminCreateUserResponseDTO>("/admin/users", {
-        method: "POST",
-        body: JSON.stringify({
-          username,
-          systemEmail,
-          familyGroupName,
-          userEmail
-        })
-      });
+      const response = await apiRequest<AdminCreateUserResponseDTO>(
+        "/admin/users",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            username,
+            systemEmail,
+            familyGroupName,
+            userEmail,
+          }),
+        },
+      );
 
       const createdUser = response.data.user;
       createUserForm.resetFields();
@@ -486,7 +556,11 @@ export const AdminShellPage = () => {
       setCopiedUserId(createdUser.id);
       messageApi.success(`已创建并复制链接：${createdUser.username}`);
     } catch (error) {
-      if (typeof error === "object" && error !== null && "errorFields" in error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "errorFields" in error
+      ) {
         return;
       }
       messageApi.error(error instanceof Error ? error.message : "创建用户失败");
@@ -507,6 +581,14 @@ export const AdminShellPage = () => {
     }
   };
 
+  const handleOpenLink = (user: AdminUserDTO) => {
+    const statusLink = buildStatusLink(user.statusToken);
+    const popup = window.open(statusLink, "_blank", "noopener,noreferrer");
+    if (!popup) {
+      messageApi.warning("浏览器拦截了跳转，请允许弹窗后重试");
+    }
+  };
+
   const handleOpenRechargeModal = (user: AdminUserDTO) => {
     setRechargeTargetUser(user);
     setRechargeModalOpen(true);
@@ -517,7 +599,7 @@ export const AdminShellPage = () => {
       reason: RechargeReason.WECHAT_PAY,
       paymentAmount: 0,
       internalNote: "",
-      externalNote: ""
+      externalNote: "",
     });
   };
 
@@ -532,7 +614,7 @@ export const AdminShellPage = () => {
       paymentAmount: 0,
       occurredAtInput: toLocalDateTimeInput(Math.floor(Date.now() / 1000)),
       internalNote: "",
-      externalNote: ""
+      externalNote: "",
     });
   };
 
@@ -543,8 +625,8 @@ export const AdminShellPage = () => {
       const response = await apiRequest<AdminResetUserTokenResponseDTO>(
         `/admin/users/${encodeURIComponent(user.id)}/reset-token`,
         {
-          method: "POST"
-        }
+          method: "POST",
+        },
       );
       const statusLink = buildStatusLink(response.data.user.statusToken);
       await navigator.clipboard.writeText(statusLink);
@@ -552,7 +634,9 @@ export const AdminShellPage = () => {
       await loadUsers(activeQuery);
       messageApi.success(`已重置并复制新链接：${user.username}`);
     } catch (error) {
-      messageApi.error(error instanceof Error ? error.message : "重置 Token 失败");
+      messageApi.error(
+        error instanceof Error ? error.message : "重置 Token 失败",
+      );
     } finally {
       setResettingTokenUserId("");
     }
@@ -566,7 +650,9 @@ export const AdminShellPage = () => {
     try {
       const values = await rechargeForm.validateFields();
       const resolvedDays =
-        values.mode === "dateRange" ? calculateDateRangeRechargeDays(values.dateRange) : values.days;
+        values.mode === "dateRange"
+          ? calculateDateRangeRechargeDays(values.dateRange)
+          : values.days;
       if (
         typeof resolvedDays !== "number" ||
         !Number.isInteger(resolvedDays) ||
@@ -587,18 +673,26 @@ export const AdminShellPage = () => {
             reason: values.reason,
             paymentAmount: values.paymentAmount,
             internalNote: values.internalNote?.trim() || undefined,
-            externalNote: values.externalNote?.trim() || undefined
-          })
-        }
+            externalNote: values.externalNote?.trim() || undefined,
+          }),
+        },
       );
 
       closeRechargeModal();
-      await Promise.all([loadUsers(activeQuery), loadDashboard(), loadRechargeRecords()]);
+      await Promise.all([
+        loadUsers(activeQuery),
+        loadDashboard(),
+        loadRechargeRecords(),
+      ]);
       messageApi.success(
-        `充值成功：${response.data.user.username}，当前到期 ${formatUnixSeconds(response.data.user.expireAt)}`
+        `充值成功：${response.data.user.username}，当前到期 ${formatUnixSeconds(response.data.user.expireAt)}`,
       );
     } catch (error) {
-      if (typeof error === "object" && error !== null && "errorFields" in error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "errorFields" in error
+      ) {
         return;
       }
       messageApi.error(error instanceof Error ? error.message : "充值失败");
@@ -615,7 +709,9 @@ export const AdminShellPage = () => {
     try {
       const values = await backfillForm.validateFields();
       const resolvedDays =
-        values.mode === "dateRange" ? calculateDateRangeRechargeDays(values.dateRange) : values.days;
+        values.mode === "dateRange"
+          ? calculateDateRangeRechargeDays(values.dateRange)
+          : values.days;
       if (
         typeof resolvedDays !== "number" ||
         !Number.isInteger(resolvedDays) ||
@@ -643,18 +739,26 @@ export const AdminShellPage = () => {
             paymentAmount: values.paymentAmount,
             occurredAt,
             internalNote: values.internalNote?.trim() || undefined,
-            externalNote: values.externalNote?.trim() || undefined
-          })
-        }
+            externalNote: values.externalNote?.trim() || undefined,
+          }),
+        },
       );
 
       closeBackfillModal();
-      await Promise.all([loadUsers(activeQuery), loadDashboard(), loadRechargeRecords()]);
+      await Promise.all([
+        loadUsers(activeQuery),
+        loadDashboard(),
+        loadRechargeRecords(),
+      ]);
       messageApi.success(
-        `补录成功：${response.data.user.username}，当前到期 ${formatUnixSeconds(response.data.user.expireAt)}`
+        `补录成功：${response.data.user.username}，当前到期 ${formatUnixSeconds(response.data.user.expireAt)}`,
       );
     } catch (error) {
-      if (typeof error === "object" && error !== null && "errorFields" in error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "errorFields" in error
+      ) {
         return;
       }
       messageApi.error(error instanceof Error ? error.message : "历史补录失败");
@@ -674,7 +778,7 @@ export const AdminShellPage = () => {
     }
 
     return `统计范围（录入时间，UTC+8）：${formatUnixSeconds(dashboard.dayStartAt)} - ${formatUnixSeconds(
-      dashboard.dayEndAt - 1
+      dashboard.dayEndAt - 1,
     )}`;
   }, [dashboard, formatUnixSeconds]);
 
@@ -684,31 +788,51 @@ export const AdminShellPage = () => {
         title: "用户 ID",
         dataIndex: "id",
         key: "id",
-        ellipsis: true,
-        render: (value: string) => <Typography.Text code>{value}</Typography.Text>
+        width: 110,
+        render: (value: string) => (
+          <Tooltip title={value}>
+            <Typography.Text>{truncateMiddle(value)}</Typography.Text>
+          </Tooltip>
+        ),
       },
       {
         title: "用户名",
         dataIndex: "username",
-        key: "username"
+        key: "username",
+        width: 80,
+        ellipsis: { showTitle: false },
+        render: (value: string) => (
+          <Tooltip title={value}>
+            <Typography.Text>{value}</Typography.Text>
+          </Tooltip>
+        ),
       },
       {
         title: "家庭组名称",
         dataIndex: "familyGroupName",
         key: "familyGroupName",
-        render: (value: string | null) => value || "-"
+        width: 120,
+        ellipsis: { showTitle: false },
+        render: (value: string | null) => {
+          const displayValue = value || "-";
+          return (
+            <Tooltip title={displayValue}>
+              <Typography.Text>{displayValue}</Typography.Text>
+            </Tooltip>
+          );
+        },
       },
       {
         title: "系统邮箱",
         dataIndex: "systemEmail",
         key: "systemEmail",
-        render: (value: string | null) => value || "-"
+        render: (value: string | null) => value || "-",
       },
       {
         title: "用户邮箱",
         dataIndex: "userEmail",
         key: "userEmail",
-        render: (value: string | null) => value || "-"
+        render: (value: string | null) => value || "-",
       },
       {
         title: "状态",
@@ -720,32 +844,73 @@ export const AdminShellPage = () => {
             <Tag color="green">有效</Tag>
           ) : (
             <Tag color="default">未生效/过期</Tag>
-          )
+          ),
       },
       {
         title: "到期时间",
         dataIndex: "expireAt",
         key: "expireAt",
-        render: (value: number) => formatUnixSeconds(value)
+        render: (value: number) => formatUnixSeconds(value),
       },
       {
         title: "创建时间",
         dataIndex: "createdAt",
         key: "createdAt",
-        render: (value: number) => formatUnixSeconds(value)
+        render: (value: number) => formatUnixSeconds(value),
       },
       {
         title: "操作",
         key: "actions",
-        width: 500,
+        fixed: "right",
+        width: 280,
         render: (_, user) => (
-          <Space size="small" wrap>
-            <Button type={copiedUserId === user.id ? "default" : "primary"} onClick={() => handleCopyLink(user)}>
-              {copiedUserId === user.id ? "已复制" : "复制链接"}
-            </Button>
-            <Button onClick={() => handleOpenUpdateModal(user)}>编辑资料</Button>
-            <Button onClick={() => handleOpenRechargeModal(user)}>充值</Button>
-            <Button onClick={() => handleOpenBackfillModal(user)}>历史补录</Button>
+          <Space size={6}>
+            <Tooltip title={copiedUserId === user.id ? "已复制" : "复制链接"}>
+              <Button
+                type={copiedUserId === user.id ? "default" : "primary"}
+                shape="circle"
+                onClick={() => handleCopyLink(user)}
+                aria-label={copiedUserId === user.id ? "已复制" : "复制链接"}
+              >
+                {copiedUserId === user.id ? "✓" : "⧉"}
+              </Button>
+            </Tooltip>
+            <Tooltip title="直接跳转">
+              <Button
+                shape="circle"
+                onClick={() => handleOpenLink(user)}
+                aria-label="直接跳转"
+              >
+                ↗
+              </Button>
+            </Tooltip>
+            <Tooltip title="编辑资料">
+              <Button
+                shape="circle"
+                onClick={() => handleOpenUpdateModal(user)}
+                aria-label="编辑资料"
+              >
+                ✎
+              </Button>
+            </Tooltip>
+            <Tooltip title="充值">
+              <Button
+                shape="circle"
+                onClick={() => handleOpenRechargeModal(user)}
+                aria-label="充值"
+              >
+                +
+              </Button>
+            </Tooltip>
+            <Tooltip title="历史补录">
+              <Button
+                shape="circle"
+                onClick={() => handleOpenBackfillModal(user)}
+                aria-label="历史补录"
+              >
+                ⏱
+              </Button>
+            </Tooltip>
             <Popconfirm
               title="重置 Token"
               description="旧链接会立即失效，确认继续？"
@@ -755,24 +920,32 @@ export const AdminShellPage = () => {
                 void handleResetToken(user);
               }}
             >
-              <Button danger loading={resettingTokenUserId === user.id}>
-                重置 Token
-              </Button>
+              <Tooltip title="重置 Token">
+                <Button
+                  danger
+                  shape="circle"
+                  loading={resettingTokenUserId === user.id}
+                  aria-label="重置 Token"
+                >
+                  ⟲
+                </Button>
+              </Tooltip>
             </Popconfirm>
           </Space>
-        )
-      }
+        ),
+      },
     ],
     [
       copiedUserId,
       formatUnixSeconds,
       handleCopyLink,
+      handleOpenLink,
       handleOpenBackfillModal,
       handleOpenRechargeModal,
       handleOpenUpdateModal,
       handleResetToken,
-      resettingTokenUserId
-    ]
+      resettingTokenUserId,
+    ],
   );
 
   const rechargeRecordColumns = useMemo<ColumnsType<AdminRechargeRecordDTO>>(
@@ -782,21 +955,21 @@ export const AdminShellPage = () => {
         dataIndex: "source",
         key: "source",
         width: 120,
-        render: (value: RechargeRecordSource) => formatRechargeSource(value)
+        render: (value: RechargeRecordSource) => formatRechargeSource(value),
       },
       {
         title: "发生时间",
         dataIndex: "occurredAt",
         key: "occurredAt",
         width: 180,
-        render: (value: number) => formatUnixSeconds(value)
+        render: (value: number) => formatUnixSeconds(value),
       },
       {
         title: "录入时间",
         dataIndex: "recordedAt",
         key: "recordedAt",
         width: 180,
-        render: (value: number) => formatUnixSeconds(value)
+        render: (value: number) => formatUnixSeconds(value),
       },
       {
         title: "用户",
@@ -810,42 +983,44 @@ export const AdminShellPage = () => {
               {record.userId}
             </Typography.Text>
           </Space>
-        )
+        ),
       },
       {
         title: "变动天数",
         dataIndex: "changeDays",
         key: "changeDays",
         width: 100,
-        render: (value: number) => <Typography.Text type="success">+{value}</Typography.Text>
+        render: (value: number) => (
+          <Typography.Text type="success">+{value}</Typography.Text>
+        ),
       },
       {
         title: "支付金额",
         dataIndex: "paymentAmount",
         key: "paymentAmount",
         width: 120,
-        render: (value: number) => formatPaymentAmount(value)
+        render: (value: number) => formatPaymentAmount(value),
       },
       {
         title: "充值前到期",
         dataIndex: "expireBefore",
         key: "expireBefore",
         width: 180,
-        render: (value: number) => formatUnixSeconds(value)
+        render: (value: number) => formatUnixSeconds(value),
       },
       {
         title: "充值后到期",
         dataIndex: "expireAfter",
         key: "expireAfter",
         width: 180,
-        render: (value: number) => formatUnixSeconds(value)
+        render: (value: number) => formatUnixSeconds(value),
       },
       {
         title: "原因",
         dataIndex: "reason",
         key: "reason",
         width: 140,
-        render: (value: RechargeReason) => formatRechargeReason(value)
+        render: (value: RechargeReason) => formatRechargeReason(value),
       },
       {
         title: "内部备注",
@@ -853,7 +1028,7 @@ export const AdminShellPage = () => {
         key: "internalNote",
         width: 220,
         ellipsis: true,
-        render: (value: string | null) => value || "-"
+        render: (value: string | null) => value || "-",
       },
       {
         title: "外部备注",
@@ -861,26 +1036,33 @@ export const AdminShellPage = () => {
         key: "externalNote",
         width: 220,
         ellipsis: true,
-        render: (value: string | null) => value || "-"
+        render: (value: string | null) => value || "-",
       },
       {
         title: "操作管理员",
         dataIndex: "operatorAdminUsername",
         key: "operatorAdminUsername",
-        width: 140
-      }
+        width: 140,
+      },
     ],
-    [formatPaymentAmount, formatRechargeReason, formatRechargeSource, formatUnixSeconds]
+    [
+      formatPaymentAmount,
+      formatRechargeReason,
+      formatRechargeSource,
+      formatUnixSeconds,
+    ],
   );
 
-  const profileChangeLogColumns = useMemo<ColumnsType<AdminUserProfileChangeRecordDTO>>(
+  const profileChangeLogColumns = useMemo<
+    ColumnsType<AdminUserProfileChangeRecordDTO>
+  >(
     () => [
       {
         title: "变更时间",
         dataIndex: "createdAt",
         key: "createdAt",
         width: 180,
-        render: (value: number) => formatUnixSeconds(value)
+        render: (value: number) => formatUnixSeconds(value),
       },
       {
         title: "用户",
@@ -894,14 +1076,15 @@ export const AdminShellPage = () => {
               {record.userId}
             </Typography.Text>
           </Space>
-        )
+        ),
       },
       {
         title: "变更字段",
         dataIndex: "field",
         key: "field",
         width: 140,
-        render: (value: UserProfileChangeField) => formatProfileChangeField(value)
+        render: (value: UserProfileChangeField) =>
+          formatProfileChangeField(value),
       },
       {
         title: "旧值",
@@ -909,7 +1092,7 @@ export const AdminShellPage = () => {
         key: "beforeValue",
         width: 220,
         ellipsis: true,
-        render: (value: string | null) => value || "-"
+        render: (value: string | null) => value || "-",
       },
       {
         title: "新值",
@@ -917,23 +1100,23 @@ export const AdminShellPage = () => {
         key: "afterValue",
         width: 220,
         ellipsis: true,
-        render: (value: string | null) => value || "-"
+        render: (value: string | null) => value || "-",
       },
       {
         title: "变更备注",
         dataIndex: "changeNote",
         key: "changeNote",
         width: 260,
-        ellipsis: true
+        ellipsis: true,
       },
       {
         title: "操作管理员",
         dataIndex: "operatorAdminUsername",
         key: "operatorAdminUsername",
-        width: 140
-      }
+        width: 140,
+      },
     ],
-    [formatProfileChangeField, formatUnixSeconds]
+    [formatProfileChangeField, formatUnixSeconds],
   );
 
   return (
@@ -950,7 +1133,10 @@ export const AdminShellPage = () => {
               已登录账号：{username}
             </Typography.Paragraph>
             {expiresAt > 0 ? (
-              <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+              <Typography.Paragraph
+                type="secondary"
+                style={{ marginBottom: 0 }}
+              >
                 会话到期时间：{formatUnixSeconds(expiresAt)}
               </Typography.Paragraph>
             ) : null}
@@ -964,7 +1150,9 @@ export const AdminShellPage = () => {
             </Button>
           </Space>
         </div>
-        {sessionErrorMessage ? <Typography.Text type="danger">{sessionErrorMessage}</Typography.Text> : null}
+        {sessionErrorMessage ? (
+          <Typography.Text type="danger">{sessionErrorMessage}</Typography.Text>
+        ) : null}
       </Card>
 
       <Card className="admin-overview-card" bordered={false}>
@@ -973,13 +1161,25 @@ export const AdminShellPage = () => {
         </Typography.Title>
         <Row gutter={[16, 16]}>
           <Col xs={24} sm={12}>
-            <Statistic title="今日充值次数" value={dashboard?.rechargeCount || 0} loading={loadingDashboard} />
+            <Statistic
+              title="今日充值次数"
+              value={dashboard?.rechargeCount || 0}
+              loading={loadingDashboard}
+            />
           </Col>
           <Col xs={24} sm={12}>
-            <Statistic title="今日送出总天数" value={dashboard?.totalChangeDays || 0} loading={loadingDashboard} suffix="天" />
+            <Statistic
+              title="今日送出总天数"
+              value={dashboard?.totalChangeDays || 0}
+              loading={loadingDashboard}
+              suffix="天"
+            />
           </Col>
         </Row>
-        <Typography.Paragraph type="secondary" style={{ marginBottom: 0, marginTop: 12 }}>
+        <Typography.Paragraph
+          type="secondary"
+          style={{ marginBottom: 0, marginTop: 12 }}
+        >
           {dashboardRangeText}
         </Typography.Paragraph>
       </Card>
@@ -1006,7 +1206,7 @@ export const AdminShellPage = () => {
           dataSource={users}
           pagination={{
             pageSize: 20,
-            showSizeChanger: false
+            showSizeChanger: false,
           }}
           scroll={{ x: 1600 }}
         />
@@ -1017,7 +1217,10 @@ export const AdminShellPage = () => {
           <Typography.Title level={5} style={{ margin: 0 }}>
             充值流水（最近 {rechargeRecords.length} 条）
           </Typography.Title>
-          <Button onClick={() => void loadRechargeRecords()} loading={loadingRechargeRecords}>
+          <Button
+            onClick={() => void loadRechargeRecords()}
+            loading={loadingRechargeRecords}
+          >
             刷新流水
           </Button>
         </div>
@@ -1029,7 +1232,7 @@ export const AdminShellPage = () => {
           dataSource={rechargeRecords}
           pagination={{
             pageSize: 10,
-            showSizeChanger: false
+            showSizeChanger: false,
           }}
           scroll={{ x: 1800 }}
         />
@@ -1040,7 +1243,10 @@ export const AdminShellPage = () => {
           <Typography.Title level={5} style={{ margin: 0 }}>
             资料变更记录（最近 {profileChangeLogs.length} 条）
           </Typography.Title>
-          <Button onClick={() => void loadProfileChangeLogs()} loading={loadingProfileChangeLogs}>
+          <Button
+            onClick={() => void loadProfileChangeLogs()}
+            loading={loadingProfileChangeLogs}
+          >
             刷新记录
           </Button>
         </div>
@@ -1052,7 +1258,7 @@ export const AdminShellPage = () => {
           dataSource={profileChangeLogs}
           pagination={{
             pageSize: 10,
-            showSizeChanger: false
+            showSizeChanger: false,
           }}
           scroll={{ x: 1600 }}
         />
@@ -1079,12 +1285,12 @@ export const AdminShellPage = () => {
             rules={[
               {
                 required: true,
-                message: "请输入用户名"
+                message: "请输入用户名",
               },
               {
                 max: 80,
-                message: "最多 80 个字符"
-              }
+                message: "最多 80 个字符",
+              },
             ]}
           >
             <Input placeholder="例如：微信名-大刘" />
@@ -1095,12 +1301,12 @@ export const AdminShellPage = () => {
             rules={[
               {
                 type: "email",
-                message: "请输入有效邮箱"
+                message: "请输入有效邮箱",
               },
               {
                 max: 120,
-                message: "最多 120 个字符"
-              }
+                message: "最多 120 个字符",
+              },
             ]}
           >
             <Input placeholder="可选，例如：ops@company.com" />
@@ -1111,8 +1317,8 @@ export const AdminShellPage = () => {
             rules={[
               {
                 max: 80,
-                message: "最多 80 个字符"
-              }
+                message: "最多 80 个字符",
+              },
             ]}
           >
             <Input placeholder="可选，例如：Unisat CRM" />
@@ -1123,12 +1329,12 @@ export const AdminShellPage = () => {
             rules={[
               {
                 type: "email",
-                message: "请输入有效邮箱"
+                message: "请输入有效邮箱",
               },
               {
                 max: 120,
-                message: "最多 120 个字符"
-              }
+                message: "最多 120 个字符",
+              },
             ]}
           >
             <Input placeholder="可选，例如：user@example.com" />
@@ -1150,7 +1356,8 @@ export const AdminShellPage = () => {
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
           <Card size="small">
             <Typography.Text>
-              用户：{updateTargetUser?.username || "-"}（{updateTargetUser?.id || "-"}）
+              用户：{updateTargetUser?.username || "-"}（
+              {updateTargetUser?.id || "-"}）
             </Typography.Text>
           </Card>
 
@@ -1161,12 +1368,12 @@ export const AdminShellPage = () => {
               rules={[
                 {
                   required: true,
-                  message: "请输入用户名"
+                  message: "请输入用户名",
                 },
                 {
                   max: 80,
-                  message: "最多 80 个字符"
-                }
+                  message: "最多 80 个字符",
+                },
               ]}
             >
               <Input placeholder="例如：微信名-大刘" />
@@ -1178,12 +1385,12 @@ export const AdminShellPage = () => {
               rules={[
                 {
                   type: "email",
-                  message: "请输入有效邮箱"
+                  message: "请输入有效邮箱",
                 },
                 {
                   max: 120,
-                  message: "最多 120 个字符"
-                }
+                  message: "最多 120 个字符",
+                },
               ]}
             >
               <Input placeholder="可选，例如：ops@company.com" />
@@ -1194,8 +1401,8 @@ export const AdminShellPage = () => {
               rules={[
                 {
                   max: MAX_PROFILE_CHANGE_NOTE_LENGTH,
-                  message: `最多 ${MAX_PROFILE_CHANGE_NOTE_LENGTH} 个字符`
-                }
+                  message: `最多 ${MAX_PROFILE_CHANGE_NOTE_LENGTH} 个字符`,
+                },
               ]}
             >
               <Input.TextArea
@@ -1212,8 +1419,8 @@ export const AdminShellPage = () => {
               rules={[
                 {
                   max: 80,
-                  message: "最多 80 个字符"
-                }
+                  message: "最多 80 个字符",
+                },
               ]}
             >
               <Input placeholder="可选，例如：Unisat CRM" />
@@ -1224,8 +1431,8 @@ export const AdminShellPage = () => {
               rules={[
                 {
                   max: MAX_PROFILE_CHANGE_NOTE_LENGTH,
-                  message: `最多 ${MAX_PROFILE_CHANGE_NOTE_LENGTH} 个字符`
-                }
+                  message: `最多 ${MAX_PROFILE_CHANGE_NOTE_LENGTH} 个字符`,
+                },
               ]}
             >
               <Input.TextArea
@@ -1242,12 +1449,12 @@ export const AdminShellPage = () => {
               rules={[
                 {
                   type: "email",
-                  message: "请输入有效邮箱"
+                  message: "请输入有效邮箱",
                 },
                 {
                   max: 120,
-                  message: "最多 120 个字符"
-                }
+                  message: "最多 120 个字符",
+                },
               ]}
             >
               <Input placeholder="可选，例如：user@example.com" />
@@ -1258,8 +1465,8 @@ export const AdminShellPage = () => {
               rules={[
                 {
                   max: MAX_PROFILE_CHANGE_NOTE_LENGTH,
-                  message: `最多 ${MAX_PROFILE_CHANGE_NOTE_LENGTH} 个字符`
-                }
+                  message: `最多 ${MAX_PROFILE_CHANGE_NOTE_LENGTH} 个字符`,
+                },
               ]}
             >
               <Input.TextArea
@@ -1287,7 +1494,8 @@ export const AdminShellPage = () => {
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
           <Card size="small">
             <Typography.Text>
-              充值用户：{rechargeTargetUser?.username || "-"}（{rechargeTargetUser?.id || "-"}）
+              充值用户：{rechargeTargetUser?.username || "-"}（
+              {rechargeTargetUser?.id || "-"}）
             </Typography.Text>
             <br />
             <Typography.Text type="secondary">
@@ -1302,14 +1510,14 @@ export const AdminShellPage = () => {
               rules={[
                 {
                   required: true,
-                  message: "请选择充值方式"
-                }
+                  message: "请选择充值方式",
+                },
               ]}
             >
               <Radio.Group
                 options={[
                   { label: "按天数", value: "days" },
-                  { label: "按日期区间", value: "dateRange" }
+                  { label: "按日期区间", value: "dateRange" },
                 ]}
                 optionType="button"
                 buttonStyle="solid"
@@ -1323,8 +1531,8 @@ export const AdminShellPage = () => {
                 rules={[
                   {
                     required: true,
-                    message: "请输入充值天数"
-                  }
+                    message: "请输入充值天数",
+                  },
                 ]}
               >
                 <InputNumber
@@ -1343,27 +1551,39 @@ export const AdminShellPage = () => {
                 rules={[
                   {
                     required: true,
-                    message: "请选择日期区间"
+                    message: "请选择日期区间",
                   },
                   {
-                    validator: (_, value: RechargeDateRangeValue | undefined) => {
+                    validator: (
+                      _,
+                      value: RechargeDateRangeValue | undefined,
+                    ) => {
                       const days = calculateDateRangeRechargeDays(value);
                       if (!days) {
-                        return Promise.reject(new Error("结束日期必须晚于开始日期"));
+                        return Promise.reject(
+                          new Error("结束日期必须晚于开始日期"),
+                        );
                       }
                       if (days > MAX_RECHARGE_DAYS) {
-                        return Promise.reject(new Error(`最多支持 ${MAX_RECHARGE_DAYS} 天`));
+                        return Promise.reject(
+                          new Error(`最多支持 ${MAX_RECHARGE_DAYS} 天`),
+                        );
                       }
                       return Promise.resolve();
-                    }
-                  }
+                    },
+                  },
                 ]}
               >
-                <DatePicker.RangePicker style={{ width: "100%" }} format="YYYY/MM/DD" />
+                <DatePicker.RangePicker
+                  style={{ width: "100%" }}
+                  format="YYYY/MM/DD"
+                />
               </Form.Item>
             )}
             {rechargeMode === "dateRange" ? (
-              <Typography.Text type={rechargeRangeDays ? "success" : "secondary"}>
+              <Typography.Text
+                type={rechargeRangeDays ? "success" : "secondary"}
+              >
                 {rechargeRangeDays
                   ? `将充值 ${rechargeRangeDays} 天（含开始日，不含结束日）`
                   : "按开始日 00:00 至结束日 00:00 计算（含开始日，不含结束日）"}
@@ -1375,15 +1595,17 @@ export const AdminShellPage = () => {
               rules={[
                 {
                   required: true,
-                  message: "请选择充值原因"
-                }
+                  message: "请选择充值原因",
+                },
               ]}
             >
               <Select
-                options={Object.entries(RECHARGE_REASON_LABELS).map(([value, label]) => ({
-                  value,
-                  label
-                }))}
+                options={Object.entries(RECHARGE_REASON_LABELS).map(
+                  ([value, label]) => ({
+                    value,
+                    label,
+                  }),
+                )}
                 placeholder="请选择充值原因"
               />
             </Form.Item>
@@ -1393,8 +1615,8 @@ export const AdminShellPage = () => {
               rules={[
                 {
                   required: true,
-                  message: "请输入支付金额"
-                }
+                  message: "请输入支付金额",
+                },
               ]}
             >
               <InputNumber
@@ -1439,7 +1661,8 @@ export const AdminShellPage = () => {
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
           <Card size="small">
             <Typography.Text>
-              补录用户：{backfillTargetUser?.username || "-"}（{backfillTargetUser?.id || "-"}）
+              补录用户：{backfillTargetUser?.username || "-"}（
+              {backfillTargetUser?.id || "-"}）
             </Typography.Text>
             <br />
             <Typography.Text type="secondary">
@@ -1458,8 +1681,8 @@ export const AdminShellPage = () => {
               rules={[
                 {
                   required: true,
-                  message: "请选择发生时间"
-                }
+                  message: "请选择发生时间",
+                },
               ]}
             >
               <Input type="datetime-local" />
@@ -1470,14 +1693,14 @@ export const AdminShellPage = () => {
               rules={[
                 {
                   required: true,
-                  message: "请选择补录方式"
-                }
+                  message: "请选择补录方式",
+                },
               ]}
             >
               <Radio.Group
                 options={[
                   { label: "按天数", value: "days" },
-                  { label: "按日期区间", value: "dateRange" }
+                  { label: "按日期区间", value: "dateRange" },
                 ]}
                 optionType="button"
                 buttonStyle="solid"
@@ -1491,8 +1714,8 @@ export const AdminShellPage = () => {
                 rules={[
                   {
                     required: true,
-                    message: "请输入补录天数"
-                  }
+                    message: "请输入补录天数",
+                  },
                 ]}
               >
                 <InputNumber
@@ -1511,27 +1734,39 @@ export const AdminShellPage = () => {
                 rules={[
                   {
                     required: true,
-                    message: "请选择日期区间"
+                    message: "请选择日期区间",
                   },
                   {
-                    validator: (_, value: RechargeDateRangeValue | undefined) => {
+                    validator: (
+                      _,
+                      value: RechargeDateRangeValue | undefined,
+                    ) => {
                       const days = calculateDateRangeRechargeDays(value);
                       if (!days) {
-                        return Promise.reject(new Error("结束日期必须晚于开始日期"));
+                        return Promise.reject(
+                          new Error("结束日期必须晚于开始日期"),
+                        );
                       }
                       if (days > MAX_RECHARGE_DAYS) {
-                        return Promise.reject(new Error(`最多支持 ${MAX_RECHARGE_DAYS} 天`));
+                        return Promise.reject(
+                          new Error(`最多支持 ${MAX_RECHARGE_DAYS} 天`),
+                        );
                       }
                       return Promise.resolve();
-                    }
-                  }
+                    },
+                  },
                 ]}
               >
-                <DatePicker.RangePicker style={{ width: "100%" }} format="YYYY/MM/DD" />
+                <DatePicker.RangePicker
+                  style={{ width: "100%" }}
+                  format="YYYY/MM/DD"
+                />
               </Form.Item>
             )}
             {backfillMode === "dateRange" ? (
-              <Typography.Text type={backfillRangeDays ? "success" : "secondary"}>
+              <Typography.Text
+                type={backfillRangeDays ? "success" : "secondary"}
+              >
                 {backfillRangeDays
                   ? `将补录 ${backfillRangeDays} 天（含开始日，不含结束日）`
                   : "按开始日 00:00 至结束日 00:00 计算（含开始日，不含结束日）"}
@@ -1543,15 +1778,17 @@ export const AdminShellPage = () => {
               rules={[
                 {
                   required: true,
-                  message: "请选择补录原因"
-                }
+                  message: "请选择补录原因",
+                },
               ]}
             >
               <Select
-                options={Object.entries(RECHARGE_REASON_LABELS).map(([value, label]) => ({
-                  value,
-                  label
-                }))}
+                options={Object.entries(RECHARGE_REASON_LABELS).map(
+                  ([value, label]) => ({
+                    value,
+                    label,
+                  }),
+                )}
                 placeholder="请选择补录原因"
               />
             </Form.Item>
@@ -1561,8 +1798,8 @@ export const AdminShellPage = () => {
               rules={[
                 {
                   required: true,
-                  message: "请输入支付金额"
-                }
+                  message: "请输入支付金额",
+                },
               ]}
             >
               <InputNumber
