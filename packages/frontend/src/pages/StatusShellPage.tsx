@@ -3,7 +3,7 @@ import {
   MembershipStatus,
   RechargeReason,
   type UserStatusHistoryRecordDTO,
-  type UserStatusResponseDTO
+  type UserStatusResponseDTO,
 } from "@vip/shared";
 import {
   Alert,
@@ -14,7 +14,7 @@ import {
   Statistic,
   Tag,
   Timeline,
-  Typography
+  Typography,
 } from "antd";
 import { useLocation, useParams } from "react-router-dom";
 
@@ -25,7 +25,7 @@ const REASON_LABELS: Record<RechargeReason, string> = {
   [RechargeReason.ALIPAY]: "支付宝支付",
   [RechargeReason.CAMPAIGN_GIFT]: "活动赠送",
   [RechargeReason.AFTER_SALES]: "售后补偿",
-  [RechargeReason.MANUAL_FIX]: "手动修正"
+  [RechargeReason.MANUAL_FIX]: "手动修正",
 };
 
 const formatUnixSeconds = (value: number) => {
@@ -35,7 +35,7 @@ const formatUnixSeconds = (value: number) => {
 
   return new Date(value * 1000).toLocaleString("zh-CN", {
     hour12: false,
-    timeZone: "Asia/Shanghai"
+    timeZone: "Asia/Shanghai",
   });
 };
 
@@ -49,7 +49,9 @@ export const StatusShellPage = () => {
   const location = useLocation();
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
-  const [statusData, setStatusData] = useState<UserStatusResponseDTO | null>(null);
+  const [statusData, setStatusData] = useState<UserStatusResponseDTO | null>(
+    null,
+  );
 
   const resolvedToken = useMemo(() => {
     const queryToken = new URLSearchParams(location.search).get("t");
@@ -72,8 +74,8 @@ export const StatusShellPage = () => {
         const response = await apiRequest<UserStatusResponseDTO>(
           `/status/${encodeURIComponent(resolvedToken)}`,
           {
-            method: "GET"
-          }
+            method: "GET",
+          },
         );
 
         if (!cancelled) {
@@ -87,7 +89,11 @@ export const StatusShellPage = () => {
         if (error instanceof ApiRequestError && error.status === 404) {
           setErrorMessage("链接已失效或不存在，请联系管理员获取新链接。");
         } else {
-          setErrorMessage(error instanceof Error ? error.message : "状态加载失败，请稍后重试。");
+          setErrorMessage(
+            error instanceof Error
+              ? error.message
+              : "状态加载失败，请稍后重试。",
+          );
         }
         setStatusData(null);
       } finally {
@@ -120,16 +126,20 @@ export const StatusShellPage = () => {
               <Typography.Title level={3} style={{ marginBottom: 8 }}>
                 你好，{statusData.user.username}
               </Typography.Title>
-              <Space wrap>
+
+              <Space wrap style={{ marginBottom: 8 }}>
+                <Typography.Text type="secondary">
+                  {statusData.user.userEmail || ""}
+                </Typography.Text>
                 {isActive ? (
-                  <Tag color="success">VIP 会员中</Tag>
+                  <Tag color="success">Gemini Pro 会员使用中</Tag>
                 ) : (
                   <Tag color="default">会员已过期</Tag>
                 )}
-                <Typography.Text type="secondary">
-                  北京时间：{formatUnixSeconds(statusData.now)}
-                </Typography.Text>
               </Space>
+              <Typography.Text type="secondary" style={{ display: "block" }}>
+                北京时间：{formatUnixSeconds(statusData.now)}
+              </Typography.Text>
             </div>
 
             <Card size="small">
@@ -139,8 +149,12 @@ export const StatusShellPage = () => {
                   value={statusData.user.remainingDays}
                   suffix="天"
                   valueStyle={{
-                    color: isExpiringSoon ? "#dc2626" : isActive ? "#047857" : "#64748b",
-                    fontWeight: 700
+                    color: isExpiringSoon
+                      ? "#dc2626"
+                      : isActive
+                        ? "#047857"
+                        : "#64748b",
+                    fontWeight: 700,
                   }}
                 />
                 <Typography.Text type="secondary">
@@ -170,7 +184,7 @@ export const StatusShellPage = () => {
         ) : null}
       </Card>
 
-      <Card className="status-history-card" title="变动历史（倒序）" bordered={false}>
+      <Card className="status-history-card" title="变动历史" bordered={false}>
         {loading ? (
           <Skeleton active paragraph={{ rows: 5 }} />
         ) : statusData && statusData.history.length > 0 ? (
@@ -184,14 +198,18 @@ export const StatusShellPage = () => {
                     {formatUnixSeconds(item.createdAt)}
                   </Typography.Text>
                   <Typography.Text type="secondary">
-                    到期变更：{formatUnixSeconds(item.expireBefore)} → {formatUnixSeconds(item.expireAfter)}
+                    到期变更：{formatUnixSeconds(item.expireBefore)} →{" "}
+                    {formatUnixSeconds(item.expireAfter)}
                   </Typography.Text>
                 </Space>
-              )
+              ),
             }))}
           />
         ) : (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无变动记录" />
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description="暂无变动记录"
+          />
         )}
       </Card>
     </main>

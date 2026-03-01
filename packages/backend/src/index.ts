@@ -159,6 +159,7 @@ interface RechargeRebuildRow {
 interface UserStatusRow {
   id: string;
   username: string;
+  user_email?: string | null;
   expire_at: number;
 }
 
@@ -764,9 +765,16 @@ app.get("/api/status/:token", async (c) => {
     return fail(c, 400, "token is required");
   }
 
+  const hasUsersProfileColumns = await hasUsersExtraProfileColumns(c.env.DB);
+  const profileSelect = hasUsersProfileColumns
+    ? "user_email"
+    : "NULL AS user_email";
   const tokenHash = await sha256Hex(token);
   const user = await c.env.DB.prepare(
-    "SELECT id, username, expire_at FROM users WHERE access_token_hash = ? LIMIT 1"
+    `SELECT id, username, ${profileSelect}, expire_at
+     FROM users
+     WHERE access_token_hash = ?
+     LIMIT 1`
   )
     .bind(tokenHash)
     .first<UserStatusRow>();
@@ -836,7 +844,8 @@ app.get("/api/status/:token", async (c) => {
           ? MembershipStatus.ACTIVE
           : MembershipStatus.EXPIRED,
       remainingDays,
-      usedDays
+      usedDays,
+      userEmail: user.user_email ?? null
     },
     history: (historyRows.results || []).map((row) =>
       toUserStatusHistoryRecordDTO(row)

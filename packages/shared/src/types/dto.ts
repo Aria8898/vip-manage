@@ -160,6 +160,7 @@ export interface UserStatusDTO extends UserSummaryDTO {
   status: MembershipStatus;
   remainingDays: number;
   usedDays: number;
+  userEmail: string | null;
 }
 
 export interface UserStatusResponseDTO {
