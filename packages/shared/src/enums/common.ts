@@ -10,3 +10,8 @@ export enum RechargeReason {
   AFTER_SALES = "after_sales",
   MANUAL_FIX = "manual_fix"
 }
+
+export enum RechargeRecordSource {
+  NORMAL = "normal",
+  BACKFILL = "backfill"
+}

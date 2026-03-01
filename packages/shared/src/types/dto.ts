@@ -1,4 +1,8 @@
-import type { MembershipStatus, RechargeReason } from "../enums/common";
+import type {
+  MembershipStatus,
+  RechargeReason,
+  RechargeRecordSource
+} from "../enums/common";
 
 export interface HealthDTO {
   status: "ok";
@@ -66,6 +70,9 @@ export interface AdminRechargeRecordDTO {
   expireAfter: number;
   operatorAdminId: string;
   operatorAdminUsername: string;
+  occurredAt: number;
+  recordedAt: number;
+  source: RechargeRecordSource;
   createdAt: number;
 }
 
@@ -74,6 +81,13 @@ export interface AdminRechargeUserResponseDTO {
     updatedAt: number;
   };
   record: AdminRechargeRecordDTO;
+}
+
+export interface AdminBackfillRechargeRequestDTO {
+  days: number;
+  reason: RechargeReason;
+  occurredAt: number;
+  internalNote?: string;
 }
 
 export interface AdminListRechargeRecordsResponseDTO {

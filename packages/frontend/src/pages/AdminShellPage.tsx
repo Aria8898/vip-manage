@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   RechargeReason,
+  RechargeRecordSource,
   type AdminCreateUserResponseDTO,
   type AdminDashboardTodayDTO,
   type AdminListRechargeRecordsResponseDTO,
@@ -44,6 +45,13 @@ interface RechargeFormValues {
   internalNote?: string;
 }
 
+interface BackfillFormValues {
+  days: number;
+  reason: RechargeReason;
+  occurredAtInput: string;
+  internalNote?: string;
+}
+
 const RECHARGE_REASON_LABELS: Record<RechargeReason, string> = {
   [RechargeReason.WECHAT_PAY]: "微信支付",
   [RechargeReason.ALIPAY]: "支付宝支付",
@@ -52,12 +60,18 @@ const RECHARGE_REASON_LABELS: Record<RechargeReason, string> = {
   [RechargeReason.MANUAL_FIX]: "手动修正"
 };
 
+const RECHARGE_SOURCE_LABELS: Record<RechargeRecordSource, string> = {
+  [RechargeRecordSource.NORMAL]: "普通充值",
+  [RechargeRecordSource.BACKFILL]: "历史补录"
+};
+
 const MAX_INTERNAL_NOTE_LENGTH = 200;
 
 export const AdminShellPage = () => {
   const navigate = useNavigate();
   const [createUserForm] = Form.useForm<CreateUserFormValues>();
   const [rechargeForm] = Form.useForm<RechargeFormValues>();
+  const [backfillForm] = Form.useForm<BackfillFormValues>();
   const [messageApi, messageContextHolder] = message.useMessage();
   const [username, setUsername] = useState<string>("-");
   const [expiresAt, setExpiresAt] = useState<number>(0);
@@ -77,6 +91,9 @@ export const AdminShellPage = () => {
   const [rechargeModalOpen, setRechargeModalOpen] = useState(false);
   const [submittingRecharge, setSubmittingRecharge] = useState(false);
   const [rechargeTargetUser, setRechargeTargetUser] = useState<AdminUserDTO | null>(null);
+  const [backfillModalOpen, setBackfillModalOpen] = useState(false);
+  const [submittingBackfill, setSubmittingBackfill] = useState(false);
+  const [backfillTargetUser, setBackfillTargetUser] = useState<AdminUserDTO | null>(null);
   const [resettingTokenUserId, setResettingTokenUserId] = useState("");
 
   const loadUsers = useCallback(async (query: string) => {
@@ -191,6 +208,25 @@ export const AdminShellPage = () => {
     return RECHARGE_REASON_LABELS[reason] || reason;
   }, []);
 
+  const formatRechargeSource = useCallback((source: RechargeRecordSource) => {
+    return RECHARGE_SOURCE_LABELS[source] || source;
+  }, []);
+
+  const toLocalDateTimeInput = useCallback((unixSeconds: number) => {
+    const date = new Date(unixSeconds * 1000);
+    const shifted = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+    return shifted.toISOString().slice(0, 16);
+  }, []);
+
+  const parseLocalDateTimeInput = useCallback((value: string): number | null => {
+    const parsedMs = Date.parse(value);
+    if (Number.isNaN(parsedMs)) {
+      return null;
+    }
+
+    return Math.floor(parsedMs / 1000);
+  }, []);
+
   const handleSearch = async (query: string) => {
     const normalized = query.trim();
     setSearchQueryInput(normalized);
@@ -202,6 +238,12 @@ export const AdminShellPage = () => {
     setRechargeTargetUser(null);
     rechargeForm.resetFields();
   }, [rechargeForm]);
+
+  const closeBackfillModal = useCallback(() => {
+    setBackfillModalOpen(false);
+    setBackfillTargetUser(null);
+    backfillForm.resetFields();
+  }, [backfillForm]);
 
   const handleCreateUserSubmit = async () => {
     try {
@@ -257,6 +299,17 @@ export const AdminShellPage = () => {
     rechargeForm.setFieldsValue({
       days: 30,
       reason: RechargeReason.WECHAT_PAY,
+      internalNote: ""
+    });
+  };
+
+  const handleOpenBackfillModal = (user: AdminUserDTO) => {
+    setBackfillTargetUser(user);
+    setBackfillModalOpen(true);
+    backfillForm.setFieldsValue({
+      days: 30,
+      reason: RechargeReason.WECHAT_PAY,
+      occurredAtInput: toLocalDateTimeInput(Math.floor(Date.now() / 1000)),
       internalNote: ""
     });
   };
@@ -318,6 +371,48 @@ export const AdminShellPage = () => {
     }
   };
 
+  const handleBackfillSubmit = async () => {
+    if (!backfillTargetUser) {
+      return;
+    }
+
+    try {
+      const values = await backfillForm.validateFields();
+      const occurredAt = parseLocalDateTimeInput(values.occurredAtInput);
+      if (!occurredAt) {
+        messageApi.error("发生时间格式无效");
+        return;
+      }
+
+      setSubmittingBackfill(true);
+      const response = await apiRequest<AdminRechargeUserResponseDTO>(
+        `/admin/users/${encodeURIComponent(backfillTargetUser.id)}/recharge/backfill`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            days: values.days,
+            reason: values.reason,
+            occurredAt,
+            internalNote: values.internalNote?.trim() || undefined
+          })
+        }
+      );
+
+      closeBackfillModal();
+      await Promise.all([loadUsers(activeQuery), loadDashboard(), loadRechargeRecords()]);
+      messageApi.success(
+        `补录成功：${response.data.user.remarkName}，当前到期 ${formatUnixSeconds(response.data.user.expireAt)}`
+      );
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "errorFields" in error) {
+        return;
+      }
+      messageApi.error(error instanceof Error ? error.message : "历史补录失败");
+    } finally {
+      setSubmittingBackfill(false);
+    }
+  };
+
   const userCountText = useMemo(() => {
     const prefix = activeQuery ? `搜索 “${activeQuery}”` : "全部用户";
     return `${prefix}：${users.length} 条`;
@@ -325,10 +420,10 @@ export const AdminShellPage = () => {
 
   const dashboardRangeText = useMemo(() => {
     if (!dashboard) {
-      return "统计范围（UTC+8）：-";
+      return "统计范围（录入时间，UTC+8）：-";
     }
 
-    return `统计范围（UTC+8）：${formatUnixSeconds(dashboard.dayStartAt)} - ${formatUnixSeconds(
+    return `统计范围（录入时间，UTC+8）：${formatUnixSeconds(dashboard.dayStartAt)} - ${formatUnixSeconds(
       dashboard.dayEndAt - 1
     )}`;
   }, [dashboard, formatUnixSeconds]);
@@ -374,13 +469,14 @@ export const AdminShellPage = () => {
       {
         title: "操作",
         key: "actions",
-        width: 320,
+        width: 420,
         render: (_, user) => (
           <Space size="small" wrap>
             <Button type={copiedUserId === user.id ? "default" : "primary"} onClick={() => handleCopyLink(user)}>
               {copiedUserId === user.id ? "已复制" : "复制链接"}
             </Button>
             <Button onClick={() => handleOpenRechargeModal(user)}>充值</Button>
+            <Button onClick={() => handleOpenBackfillModal(user)}>历史补录</Button>
             <Popconfirm
               title="重置 Token"
               description="旧链接会立即失效，确认继续？"
@@ -402,6 +498,7 @@ export const AdminShellPage = () => {
       copiedUserId,
       formatUnixSeconds,
       handleCopyLink,
+      handleOpenBackfillModal,
       handleOpenRechargeModal,
       handleResetToken,
       resettingTokenUserId
@@ -411,9 +508,23 @@ export const AdminShellPage = () => {
   const rechargeRecordColumns = useMemo<ColumnsType<AdminRechargeRecordDTO>>(
     () => [
       {
-        title: "时间",
-        dataIndex: "createdAt",
-        key: "createdAt",
+        title: "来源",
+        dataIndex: "source",
+        key: "source",
+        width: 120,
+        render: (value: RechargeRecordSource) => formatRechargeSource(value)
+      },
+      {
+        title: "发生时间",
+        dataIndex: "occurredAt",
+        key: "occurredAt",
+        width: 180,
+        render: (value: number) => formatUnixSeconds(value)
+      },
+      {
+        title: "录入时间",
+        dataIndex: "recordedAt",
+        key: "recordedAt",
         width: 180,
         render: (value: number) => formatUnixSeconds(value)
       },
@@ -474,7 +585,7 @@ export const AdminShellPage = () => {
         width: 140
       }
     ],
-    [formatRechargeReason, formatUnixSeconds]
+    [formatRechargeReason, formatRechargeSource, formatUnixSeconds]
   );
 
   return (
@@ -572,7 +683,7 @@ export const AdminShellPage = () => {
             pageSize: 10,
             showSizeChanger: false
           }}
-          scroll={{ x: 1500 }}
+          scroll={{ x: 1800 }}
         />
       </Card>
 
@@ -669,6 +780,87 @@ export const AdminShellPage = () => {
                 showCount
                 rows={3}
                 placeholder="可选，用于记录转账单号、订单备注等"
+              />
+            </Form.Item>
+          </Form>
+        </Space>
+      </Modal>
+
+      <Modal
+        title="历史补录"
+        open={backfillModalOpen}
+        okText="确认补录并重算"
+        cancelText="取消"
+        confirmLoading={submittingBackfill}
+        onOk={() => {
+          void handleBackfillSubmit();
+        }}
+        onCancel={closeBackfillModal}
+      >
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          <Card size="small">
+            <Typography.Text>
+              补录用户：{backfillTargetUser?.remarkName || "-"}（{backfillTargetUser?.id || "-"}）
+            </Typography.Text>
+            <br />
+            <Typography.Text type="secondary">
+              当前到期：{formatUnixSeconds(backfillTargetUser?.expireAt || 0)}
+            </Typography.Text>
+          </Card>
+
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+            历史补录会按“发生时间”重排并重算该用户后续流水。
+          </Typography.Paragraph>
+
+          <Form<BackfillFormValues> layout="vertical" form={backfillForm}>
+            <Form.Item
+              label="发生时间（本地时区）"
+              name="occurredAtInput"
+              rules={[
+                {
+                  required: true,
+                  message: "请选择发生时间"
+                }
+              ]}
+            >
+              <Input type="datetime-local" />
+            </Form.Item>
+            <Form.Item
+              label="补录天数"
+              name="days"
+              rules={[
+                {
+                  required: true,
+                  message: "请输入补录天数"
+                }
+              ]}
+            >
+              <InputNumber min={1} max={3650} precision={0} style={{ width: "100%" }} placeholder="例如：30" />
+            </Form.Item>
+            <Form.Item
+              label="补录原因"
+              name="reason"
+              rules={[
+                {
+                  required: true,
+                  message: "请选择补录原因"
+                }
+              ]}
+            >
+              <Select
+                options={Object.entries(RECHARGE_REASON_LABELS).map(([value, label]) => ({
+                  value,
+                  label
+                }))}
+                placeholder="请选择补录原因"
+              />
+            </Form.Item>
+            <Form.Item label="内部备注" name="internalNote">
+              <Input.TextArea
+                maxLength={MAX_INTERNAL_NOTE_LENGTH}
+                showCount
+                rows={3}
+                placeholder="可选，建议记录外部系统单号或原始凭证"
               />
             </Form.Item>
           </Form>
