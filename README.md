@@ -1,10 +1,10 @@
 # VIP Membership Monorepo
 
-P0 基础搭建已包含：
+P1 鉴权闭环已包含：
 
 - `packages/shared`：前后端共享类型和常量
-- `packages/backend`：Cloudflare Worker + Hono + D1 migration
-- `packages/frontend`：React + Vite 壳页面与 API 客户端
+- `packages/backend`：Cloudflare Worker + Hono + D1 migration + 管理员登录鉴权
+- `packages/frontend`：React + Vite 壳页面 + 登录页与后台路由守卫
 
 ## 1. 安装依赖
 
@@ -42,3 +42,23 @@ pnpm db:migrate:remote
 
 - 后端模板：`packages/backend/.dev.vars.example`
 - 前端模板：`packages/frontend/.env.example`
+
+## 6. 初始化管理员账号
+
+先创建本地密钥配置：
+
+```bash
+cp packages/backend/.dev.vars.example packages/backend/.dev.vars
+```
+
+然后执行管理员导入（默认打印 SQL，不执行）：
+
+```bash
+pnpm --filter @vip/backend admin:import -- --username admin --password "StrongPassword123"
+```
+
+直接写入 D1（`local` 或 `remote`）：
+
+```bash
+pnpm --filter @vip/backend admin:import -- --username admin --password "StrongPassword123" --target local
+```

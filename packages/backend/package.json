@@ -8,8 +8,9 @@
     "deploy": "wrangler deploy",
     "build": "wrangler deploy --dry-run",
     "typecheck": "tsc -p tsconfig.json",
-    "db:migrate:local": "wrangler d1 migrations apply VIP_DB --local",
-    "db:migrate:remote": "wrangler d1 migrations apply VIP_DB --remote"
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "admin:import": "node ./scripts/import-admin.mjs"
   },
   "dependencies": {
     "@vip/shared": "workspace:*",

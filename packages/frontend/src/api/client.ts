@@ -6,6 +6,20 @@ interface RequestOptions extends RequestInit {
   query?: Record<string, string | number | boolean | undefined>;
 }
 
+export class ApiRequestError extends Error {
+  status: number;
+  code?: number;
+  requestId?: string;
+
+  constructor(message: string, status: number, code?: number, requestId?: string) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.code = code;
+    this.requestId = requestId;
+  }
+}
+
 const buildUrl = (path: string, query?: RequestOptions["query"]): string => {
   const url = new URL(`${DEFAULT_BASE}${path}`, window.location.origin);
 
@@ -27,16 +41,23 @@ export const apiRequest = async <T>(
 ): Promise<ApiResponse<T>> => {
   const requestUrl = buildUrl(path, options.query);
   const response = await fetch(requestUrl, {
+    credentials: options.credentials ?? "include",
     ...options,
     headers: {
       "Content-Type": "application/json",
       ...(options.headers || {})
     }
   });
+  const payload = (await response.json().catch(() => null)) as ApiResponse<T> | null;
 
-  if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+  if (!response.ok || !payload || payload.code !== 0) {
+    throw new ApiRequestError(
+      payload?.message || `Request failed: ${response.status}`,
+      response.status,
+      payload?.code,
+      payload?.requestId
+    );
   }
 
-  return (await response.json()) as ApiResponse<T>;
+  return payload;
 };

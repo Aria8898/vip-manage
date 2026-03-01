@@ -1,2 +1,3 @@
 # Copy to .dev.vars for local secret management.
 JWT_SECRET=replace_me_with_a_long_random_string
+ADMIN_SESSION_TTL_SECONDS=604800
