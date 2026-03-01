@@ -6,6 +6,8 @@ export enum MembershipStatus {
 export enum RechargeReason {
   WECHAT_PAY = "wechat_pay",
   ALIPAY = "alipay",
+  PLATFORM_ORDER = "platform_order",
+  REFERRAL_REWARD = "referral_reward",
   CAMPAIGN_GIFT = "campaign_gift",
   AFTER_SALES = "after_sales",
   MANUAL_FIX = "manual_fix"

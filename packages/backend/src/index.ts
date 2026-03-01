@@ -439,6 +439,8 @@ const isRechargeReason = (value: string): value is RechargeReason => {
   return (
     value === RechargeReason.WECHAT_PAY ||
     value === RechargeReason.ALIPAY ||
+    value === RechargeReason.PLATFORM_ORDER ||
+    value === RechargeReason.REFERRAL_REWARD ||
     value === RechargeReason.CAMPAIGN_GIFT ||
     value === RechargeReason.AFTER_SALES ||
     value === RechargeReason.MANUAL_FIX

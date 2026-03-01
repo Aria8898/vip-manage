@@ -23,6 +23,8 @@ import { apiRequest, ApiRequestError } from "../api/client";
 const REASON_LABELS: Record<RechargeReason, string> = {
   [RechargeReason.WECHAT_PAY]: "微信支付",
   [RechargeReason.ALIPAY]: "支付宝支付",
+  [RechargeReason.PLATFORM_ORDER]: "平台下单",
+  [RechargeReason.REFERRAL_REWARD]: "推荐奖励",
   [RechargeReason.CAMPAIGN_GIFT]: "活动赠送",
   [RechargeReason.AFTER_SALES]: "售后补偿",
   [RechargeReason.MANUAL_FIX]: "手动修正",
