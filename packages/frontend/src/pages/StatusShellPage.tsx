@@ -1,10 +1,14 @@
 import { useMemo } from "react";
-import { useParams } from "react-router-dom";
+import { useLocation, useParams } from "react-router-dom";
 
 export const StatusShellPage = () => {
   const { token } = useParams<{ token: string }>();
+  const location = useLocation();
 
-  const safeToken = useMemo(() => token || "(missing)", [token]);
+  const safeToken = useMemo(() => {
+    const queryToken = new URLSearchParams(location.search).get("t");
+    return token || queryToken || "(missing)";
+  }, [location.search, token]);
 
   return (
     <main className="shell">

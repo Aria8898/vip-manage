@@ -15,3 +15,5 @@ coverage
 .env.*
 !.env.example
 !.dev.vars.example
+
+*.vars

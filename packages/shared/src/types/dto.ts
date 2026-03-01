@@ -26,3 +26,23 @@ export interface UserSummaryDTO {
   remarkName: string;
   expireAt: number;
 }
+
+export interface AdminCreateUserRequestDTO {
+  remarkName: string;
+}
+
+export interface AdminUserDTO extends UserSummaryDTO {
+  createdAt: number;
+  updatedAt: number;
+  tokenVersion: number;
+  statusToken: string;
+}
+
+export interface AdminCreateUserResponseDTO {
+  user: AdminUserDTO;
+}
+
+export interface AdminListUsersResponseDTO {
+  items: AdminUserDTO[];
+  query: string;
+}

@@ -20,6 +20,7 @@ const App = () => {
             </AdminRouteGuard>
           }
         />
+        <Route path="/status" element={<StatusShellPage />} />
         <Route path="/status/:token" element={<StatusShellPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
