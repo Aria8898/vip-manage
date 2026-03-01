@@ -15,3 +15,9 @@ export enum RechargeRecordSource {
   NORMAL = "normal",
   BACKFILL = "backfill"
 }
+
+export enum UserProfileChangeField {
+  SYSTEM_EMAIL = "systemEmail",
+  FAMILY_GROUP_NAME = "familyGroupName",
+  USER_EMAIL = "userEmail"
+}

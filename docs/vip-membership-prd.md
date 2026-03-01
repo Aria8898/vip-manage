@@ -95,7 +95,7 @@
 ### 6.1 `users`
 
 - `id`
-- `remark_name`
+- `username`
 - `token`
 - `expire_at`
 - `created_at`

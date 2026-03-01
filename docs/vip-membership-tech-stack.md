@@ -75,7 +75,7 @@
 
 1. `users`
    - `id` (TEXT/UUID)
-   - `remark_name` (TEXT)
+   - `username` (TEXT)
    - `access_token_hash` (TEXT, UNIQUE)
    - `expire_at` (INTEGER)
    - `created_at` (INTEGER)
@@ -106,7 +106,7 @@
 ### 4.3 索引建议
 
 - `users(access_token_hash)` 唯一索引
-- `users(remark_name)` 普通索引
+- `users(username)` 普通索引
 - `recharge_records(user_id, created_at DESC)` 复合索引
 - `recharge_records(created_at)` 普通索引（便于今日统计）
 

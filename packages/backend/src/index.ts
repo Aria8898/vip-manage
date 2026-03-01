@@ -5,10 +5,12 @@ import {
   MembershipStatus,
   RechargeReason,
   RechargeRecordSource,
+  UserProfileChangeField,
   type AdminBackfillRechargeRequestDTO,
   type AdminCreateUserRequestDTO,
   type AdminCreateUserResponseDTO,
   type AdminDashboardTodayDTO,
+  type AdminListUserProfileChangeLogsResponseDTO,
   type AdminListRechargeRecordsResponseDTO,
   type AdminResetUserTokenResponseDTO,
   type AdminListUsersResponseDTO,
@@ -18,7 +20,10 @@ import {
   type AdminRechargeUserRequestDTO,
   type AdminRechargeUserResponseDTO,
   type AdminSessionDTO,
+  type AdminUpdateUserRequestDTO,
+  type AdminUpdateUserResponseDTO,
   type AdminUserDTO,
+  type AdminUserProfileChangeRecordDTO,
   type ApiResponse,
   type HealthDTO,
   type UserStatusHistoryRecordDTO,
@@ -57,13 +62,19 @@ const DEFAULT_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
 const DEFAULT_USER_TOKEN_VERSION = 1;
 const DEFAULT_RECHARGE_RECORD_LIMIT = 100;
 const MAX_RECHARGE_RECORD_LIMIT = 200;
+const DEFAULT_PROFILE_CHANGE_LOG_LIMIT = 100;
+const MAX_PROFILE_CHANGE_LOG_LIMIT = 200;
 const DEFAULT_STATUS_HISTORY_LIMIT = 50;
 const USER_LIST_LIMIT = 100;
-const MAX_REMARK_NAME_LENGTH = 80;
+const MAX_USERNAME_LENGTH = 80;
+const MAX_FAMILY_GROUP_NAME_LENGTH = 80;
+const MAX_EMAIL_LENGTH = 120;
 const MAX_INTERNAL_NOTE_LENGTH = 200;
+const MAX_PROFILE_CHANGE_NOTE_LENGTH = 200;
 const MAX_RECHARGE_DAYS = 3650;
 const SECONDS_PER_DAY = 24 * 60 * 60;
 const UTC8_OFFSET_SECONDS = 8 * 60 * 60;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
 type HttpStatus = 200 | 400 | 401 | 404 | 429 | 500;
 
 interface AdminUserRow {
@@ -74,7 +85,10 @@ interface AdminUserRow {
 
 interface UserRow {
   id: string;
-  remark_name: string;
+  username: string;
+  system_email?: string | null;
+  family_group_name?: string | null;
+  user_email?: string | null;
   expire_at: number;
   created_at: number;
   updated_at: number;
@@ -87,7 +101,7 @@ interface SqliteTableInfoRow {
 
 interface RechargeTargetUserRow {
   id: string;
-  remark_name: string;
+  username: string;
   expire_at: number;
   updated_at?: number;
 }
@@ -95,7 +109,7 @@ interface RechargeTargetUserRow {
 interface RechargeRecordRow {
   id: string;
   user_id: string;
-  user_remark_name: string;
+  username: string;
   change_days: number;
   reason: string;
   internal_note: string | null;
@@ -106,6 +120,20 @@ interface RechargeRecordRow {
   occurred_at: number | null;
   recorded_at: number | null;
   source: string | null;
+  created_at: number;
+}
+
+interface UserProfileChangeLogRow {
+  id: string;
+  change_batch_id: string;
+  user_id: string;
+  username: string;
+  field_name: string;
+  before_value: string | null;
+  after_value: string | null;
+  change_note: string;
+  operator_admin_id: string;
+  operator_admin_username: string;
   created_at: number;
 }
 
@@ -124,7 +152,7 @@ interface RechargeRebuildRow {
 
 interface UserStatusRow {
   id: string;
-  remark_name: string;
+  username: string;
   expire_at: number;
 }
 
@@ -140,7 +168,10 @@ interface UserStatusHistoryRow {
 
 interface ResetTokenTargetUserRow {
   id: string;
-  remark_name: string;
+  username: string;
+  system_email?: string | null;
+  family_group_name?: string | null;
+  user_email?: string | null;
   expire_at: number;
   created_at: number;
   token_version: number;
@@ -150,6 +181,7 @@ interface ResetTokenTargetUserRow {
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 type AppContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 let cachedHasUsersTokenVersionColumn: boolean | null = null;
+let cachedHasUsersExtraProfileColumns: boolean | null = null;
 let cachedHasRechargeTimelineColumns: boolean | null = null;
 
 const getCurrentTimestamp = (): number => Math.floor(Date.now() / 1000);
@@ -272,7 +304,10 @@ const toAdminUserDTO = async (
 
   return {
     id: row.id,
-    remarkName: row.remark_name,
+    username: row.username,
+    systemEmail: row.system_email ?? null,
+    familyGroupName: row.family_group_name ?? null,
+    userEmail: row.user_email ?? null,
     expireAt: row.expire_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -291,6 +326,22 @@ const hasUsersTokenVersionColumn = async (db: D1Database): Promise<boolean> => {
   cachedHasUsersTokenVersionColumn = hasColumn;
 
   return hasColumn;
+};
+
+const hasUsersExtraProfileColumns = async (db: D1Database): Promise<boolean> => {
+  if (cachedHasUsersExtraProfileColumns !== null) {
+    return cachedHasUsersExtraProfileColumns;
+  }
+
+  const rows = await db.prepare("PRAGMA table_info(users)").all<SqliteTableInfoRow>();
+  const columnNames = new Set((rows.results || []).map((row) => row.name));
+  const hasColumns =
+    columnNames.has("system_email") &&
+    columnNames.has("family_group_name") &&
+    columnNames.has("user_email");
+  cachedHasUsersExtraProfileColumns = hasColumns;
+
+  return hasColumns;
 };
 
 const hasRechargeTimelineColumns = async (db: D1Database): Promise<boolean> => {
@@ -321,6 +372,45 @@ const normalizeInternalNote = (value: unknown): string | null => {
 
   return trimmed;
 };
+
+const normalizeOptionalText = (value: unknown): string | null => {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  return trimmed;
+};
+
+const normalizeProfileChangeNote = (value: unknown): string | null => {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  return trimmed;
+};
+
+const isUserProfileChangeField = (value: string): value is UserProfileChangeField => {
+  return (
+    value === UserProfileChangeField.SYSTEM_EMAIL ||
+    value === UserProfileChangeField.FAMILY_GROUP_NAME ||
+    value === UserProfileChangeField.USER_EMAIL
+  );
+};
+
+const toUserProfileChangeField = (value: string): UserProfileChangeField =>
+  isUserProfileChangeField(value)
+    ? value
+    : UserProfileChangeField.SYSTEM_EMAIL;
 
 const isRechargeReason = (value: string): value is RechargeReason => {
   return (
@@ -353,7 +443,7 @@ const toRecordedAt = (row: {
 const toAdminRechargeRecordDTO = (row: RechargeRecordRow): AdminRechargeRecordDTO => ({
   id: row.id,
   userId: row.user_id,
-  userRemarkName: row.user_remark_name,
+  username: row.username,
   changeDays: row.change_days,
   reason: toRechargeReason(row.reason),
   internalNote: row.internal_note,
@@ -364,6 +454,22 @@ const toAdminRechargeRecordDTO = (row: RechargeRecordRow): AdminRechargeRecordDT
   occurredAt: toOccurredAt(row),
   recordedAt: toRecordedAt(row),
   source: toRechargeRecordSource(row.source),
+  createdAt: row.created_at
+});
+
+const toAdminUserProfileChangeRecordDTO = (
+  row: UserProfileChangeLogRow
+): AdminUserProfileChangeRecordDTO => ({
+  id: row.id,
+  changeBatchId: row.change_batch_id,
+  userId: row.user_id,
+  username: row.username,
+  field: toUserProfileChangeField(row.field_name),
+  beforeValue: row.before_value,
+  afterValue: row.after_value,
+  changeNote: row.change_note,
+  operatorAdminId: row.operator_admin_id,
+  operatorAdminUsername: row.operator_admin_username,
   createdAt: row.created_at
 });
 
@@ -466,7 +572,7 @@ const createAndRebuildRechargeRecord = async (
   const now = getCurrentTimestamp();
 
   const user = await c.env.DB.prepare(
-    "SELECT id, remark_name, expire_at, updated_at FROM users WHERE id = ? LIMIT 1"
+    "SELECT id, username, expire_at, updated_at FROM users WHERE id = ? LIMIT 1"
   )
     .bind(params.userId)
     .first<RechargeTargetUserRow>();
@@ -510,7 +616,7 @@ const createAndRebuildRechargeRecord = async (
     `SELECT
       r.id,
       r.user_id,
-      u.remark_name AS user_remark_name,
+      u.username AS username,
       r.change_days,
       r.reason,
       r.internal_note,
@@ -537,7 +643,7 @@ const createAndRebuildRechargeRecord = async (
   return {
     user: {
       id: user.id,
-      remarkName: user.remark_name,
+      username: user.username,
       expireAt: finalExpireAt,
       updatedAt: now
     },
@@ -633,7 +739,7 @@ app.get("/api/status/:token", async (c) => {
 
   const tokenHash = await sha256Hex(token);
   const user = await c.env.DB.prepare(
-    "SELECT id, remark_name, expire_at FROM users WHERE access_token_hash = ? LIMIT 1"
+    "SELECT id, username, expire_at FROM users WHERE access_token_hash = ? LIMIT 1"
   )
     .bind(tokenHash)
     .first<UserStatusRow>();
@@ -685,7 +791,7 @@ app.get("/api/status/:token", async (c) => {
   const payload: UserStatusResponseDTO = {
     user: {
       id: user.id,
-      remarkName: user.remark_name,
+      username: user.username,
       expireAt: user.expire_at,
       status:
         user.expire_at > now
@@ -791,12 +897,30 @@ app.post("/api/admin/users", async (c) => {
   }
 
   const body = await c.req.json<Partial<AdminCreateUserRequestDTO>>().catch(() => null);
-  const remarkName = body?.remarkName?.trim();
-  if (!remarkName) {
-    return fail(c, 400, "remarkName is required");
+  const username = body?.username?.trim();
+  if (!username) {
+    return fail(c, 400, "username is required");
   }
-  if (remarkName.length > MAX_REMARK_NAME_LENGTH) {
-    return fail(c, 400, `remarkName must be <= ${MAX_REMARK_NAME_LENGTH} chars`);
+  if (username.length > MAX_USERNAME_LENGTH) {
+    return fail(c, 400, `username must be <= ${MAX_USERNAME_LENGTH} chars`);
+  }
+  const systemEmail = normalizeOptionalText(body?.systemEmail)?.toLowerCase();
+  const familyGroupName = normalizeOptionalText(body?.familyGroupName);
+  const userEmail = normalizeOptionalText(body?.userEmail)?.toLowerCase();
+  if (familyGroupName && familyGroupName.length > MAX_FAMILY_GROUP_NAME_LENGTH) {
+    return fail(c, 400, `familyGroupName must be <= ${MAX_FAMILY_GROUP_NAME_LENGTH} chars`);
+  }
+  if (systemEmail && systemEmail.length > MAX_EMAIL_LENGTH) {
+    return fail(c, 400, `systemEmail must be <= ${MAX_EMAIL_LENGTH} chars`);
+  }
+  if (userEmail && userEmail.length > MAX_EMAIL_LENGTH) {
+    return fail(c, 400, `userEmail must be <= ${MAX_EMAIL_LENGTH} chars`);
+  }
+  if (systemEmail && !EMAIL_PATTERN.test(systemEmail)) {
+    return fail(c, 400, "systemEmail must be a valid email");
+  }
+  if (userEmail && !EMAIL_PATTERN.test(userEmail)) {
+    return fail(c, 400, "userEmail must be a valid email");
   }
 
   const userId = crypto.randomUUID();
@@ -804,18 +928,38 @@ app.post("/api/admin/users", async (c) => {
   const statusToken = await buildUserStatusToken(userId, tokenVersion, tokenSecret);
   const tokenHash = await sha256Hex(statusToken);
   const hasTokenVersionColumn = await hasUsersTokenVersionColumn(c.env.DB);
+  const hasUsersProfileColumns = await hasUsersExtraProfileColumns(c.env.DB);
 
-  if (hasTokenVersionColumn) {
+  if (!hasUsersProfileColumns && (systemEmail || familyGroupName || userEmail)) {
+    return fail(c, 500, "database migration required: users profile columns missing");
+  }
+
+  if (hasTokenVersionColumn && hasUsersProfileColumns) {
     await c.env.DB.prepare(
-      "INSERT INTO users (id, remark_name, access_token_hash, token_version, expire_at) VALUES (?, ?, ?, ?, 0)"
+      `INSERT INTO users (
+        id,
+        username,
+        system_email,
+        family_group_name,
+        user_email,
+        access_token_hash,
+        token_version,
+        expire_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)`
     )
-      .bind(userId, remarkName, tokenHash, tokenVersion)
+      .bind(userId, username, systemEmail ?? null, familyGroupName ?? null, userEmail ?? null, tokenHash, tokenVersion)
+      .run();
+  } else if (hasTokenVersionColumn) {
+    await c.env.DB.prepare(
+      "INSERT INTO users (id, username, access_token_hash, token_version, expire_at) VALUES (?, ?, ?, ?, 0)"
+    )
+      .bind(userId, username, tokenHash, tokenVersion)
       .run();
   } else {
     await c.env.DB.prepare(
-      "INSERT INTO users (id, remark_name, access_token_hash, expire_at) VALUES (?, ?, ?, 0)"
+      "INSERT INTO users (id, username, access_token_hash, expire_at) VALUES (?, ?, ?, 0)"
     )
-      .bind(userId, remarkName, tokenHash)
+      .bind(userId, username, tokenHash)
       .run();
   }
 
@@ -823,7 +967,10 @@ app.post("/api/admin/users", async (c) => {
   const payload: AdminCreateUserResponseDTO = {
     user: {
       id: userId,
-      remarkName,
+      username,
+      systemEmail: hasUsersProfileColumns ? systemEmail ?? null : null,
+      familyGroupName: hasUsersProfileColumns ? familyGroupName ?? null : null,
+      userEmail: hasUsersProfileColumns ? userEmail ?? null : null,
       expireAt: 0,
       createdAt: now,
       updatedAt: now,
@@ -844,22 +991,26 @@ app.get("/api/admin/users", async (c) => {
   const query = c.req.query("query")?.trim() || "";
   const escapedQuery = query.replaceAll("%", "\\%").replaceAll("_", "\\_");
   const hasTokenVersionColumn = await hasUsersTokenVersionColumn(c.env.DB);
+  const hasUsersProfileColumns = await hasUsersExtraProfileColumns(c.env.DB);
   const tokenVersionSelect = hasTokenVersionColumn
     ? "token_version"
     : `${DEFAULT_USER_TOKEN_VERSION} AS token_version`;
+  const profileSelect = hasUsersProfileColumns
+    ? "system_email, family_group_name, user_email"
+    : "NULL AS system_email, NULL AS family_group_name, NULL AS user_email";
 
   const rows = query
     ? await c.env.DB.prepare(
-      `SELECT id, remark_name, expire_at, created_at, updated_at, ${tokenVersionSelect}
+      `SELECT id, username, ${profileSelect}, expire_at, created_at, updated_at, ${tokenVersionSelect}
        FROM users
-       WHERE remark_name LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\'
+       WHERE username LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\'
        ORDER BY created_at DESC
        LIMIT ?`
     )
       .bind(`%${escapedQuery}%`, `%${escapedQuery}%`, USER_LIST_LIMIT)
       .all<UserRow>()
     : await c.env.DB.prepare(
-      `SELECT id, remark_name, expire_at, created_at, updated_at, ${tokenVersionSelect}
+      `SELECT id, username, ${profileSelect}, expire_at, created_at, updated_at, ${tokenVersionSelect}
        FROM users
        ORDER BY created_at DESC
        LIMIT ?`
@@ -871,6 +1022,203 @@ app.get("/api/admin/users", async (c) => {
   const payload: AdminListUsersResponseDTO = {
     items: users,
     query
+  };
+
+  return ok(c, payload);
+});
+
+app.patch("/api/admin/users/:id", async (c) => {
+  const tokenSecret = getUserTokenSecret(c.env);
+  if (!tokenSecret) {
+    return fail(c, 500, "user token secret is not configured");
+  }
+
+  const userId = c.req.param("id")?.trim();
+  if (!userId) {
+    return fail(c, 400, "user id is required");
+  }
+
+  const hasUsersProfileColumns = await hasUsersExtraProfileColumns(c.env.DB);
+  if (!hasUsersProfileColumns) {
+    return fail(c, 500, "database migration required: users profile columns missing");
+  }
+
+  const body = await c.req.json<Partial<AdminUpdateUserRequestDTO>>().catch(() => null);
+  const username = typeof body?.username === "string" ? body.username.trim() : "";
+  if (!username) {
+    return fail(c, 400, "username is required");
+  }
+  if (username.length > MAX_USERNAME_LENGTH) {
+    return fail(c, 400, `username must be <= ${MAX_USERNAME_LENGTH} chars`);
+  }
+
+  const systemEmail = normalizeOptionalText(body?.systemEmail)?.toLowerCase() ?? null;
+  const familyGroupName = normalizeOptionalText(body?.familyGroupName);
+  const userEmail = normalizeOptionalText(body?.userEmail)?.toLowerCase() ?? null;
+  if (familyGroupName && familyGroupName.length > MAX_FAMILY_GROUP_NAME_LENGTH) {
+    return fail(c, 400, `familyGroupName must be <= ${MAX_FAMILY_GROUP_NAME_LENGTH} chars`);
+  }
+  if (systemEmail && systemEmail.length > MAX_EMAIL_LENGTH) {
+    return fail(c, 400, `systemEmail must be <= ${MAX_EMAIL_LENGTH} chars`);
+  }
+  if (userEmail && userEmail.length > MAX_EMAIL_LENGTH) {
+    return fail(c, 400, `userEmail must be <= ${MAX_EMAIL_LENGTH} chars`);
+  }
+  if (systemEmail && !EMAIL_PATTERN.test(systemEmail)) {
+    return fail(c, 400, "systemEmail must be a valid email");
+  }
+  if (userEmail && !EMAIL_PATTERN.test(userEmail)) {
+    return fail(c, 400, "userEmail must be a valid email");
+  }
+
+  const changeNotesRaw = (
+    body?.changeNotes && typeof body.changeNotes === "object"
+      ? body.changeNotes
+      : {}
+  ) as Partial<Record<UserProfileChangeField, unknown>>;
+  const changeNotes: Partial<Record<UserProfileChangeField, string | null>> = {
+    [UserProfileChangeField.SYSTEM_EMAIL]: normalizeProfileChangeNote(
+      changeNotesRaw[UserProfileChangeField.SYSTEM_EMAIL]
+    ),
+    [UserProfileChangeField.FAMILY_GROUP_NAME]: normalizeProfileChangeNote(
+      changeNotesRaw[UserProfileChangeField.FAMILY_GROUP_NAME]
+    ),
+    [UserProfileChangeField.USER_EMAIL]: normalizeProfileChangeNote(
+      changeNotesRaw[UserProfileChangeField.USER_EMAIL]
+    )
+  };
+
+  for (const field of Object.values(UserProfileChangeField)) {
+    const note = changeNotes[field];
+    if (note && note.length > MAX_PROFILE_CHANGE_NOTE_LENGTH) {
+      return fail(c, 400, `change note for ${field} must be <= ${MAX_PROFILE_CHANGE_NOTE_LENGTH} chars`);
+    }
+  }
+
+  const hasTokenVersionColumn = await hasUsersTokenVersionColumn(c.env.DB);
+  const tokenVersionSelect = hasTokenVersionColumn
+    ? "token_version"
+    : `${DEFAULT_USER_TOKEN_VERSION} AS token_version`;
+  const user = await c.env.DB.prepare(
+    `SELECT
+      id,
+      username,
+      system_email,
+      family_group_name,
+      user_email,
+      expire_at,
+      created_at,
+      updated_at,
+      ${tokenVersionSelect}
+    FROM users
+    WHERE id = ?
+    LIMIT 1`
+  )
+    .bind(userId)
+    .first<UserRow>();
+  if (!user) {
+    return fail(c, 404, "user not found");
+  }
+
+  const profileChanges: Array<{
+    field: UserProfileChangeField;
+    beforeValue: string | null;
+    afterValue: string | null;
+    changeNote: string | null;
+  }> = [];
+  if ((user.system_email ?? null) !== systemEmail) {
+    profileChanges.push({
+      field: UserProfileChangeField.SYSTEM_EMAIL,
+      beforeValue: user.system_email ?? null,
+      afterValue: systemEmail,
+      changeNote: changeNotes[UserProfileChangeField.SYSTEM_EMAIL] ?? null
+    });
+  }
+  if ((user.family_group_name ?? null) !== (familyGroupName ?? null)) {
+    profileChanges.push({
+      field: UserProfileChangeField.FAMILY_GROUP_NAME,
+      beforeValue: user.family_group_name ?? null,
+      afterValue: familyGroupName ?? null,
+      changeNote: changeNotes[UserProfileChangeField.FAMILY_GROUP_NAME] ?? null
+    });
+  }
+  if ((user.user_email ?? null) !== userEmail) {
+    profileChanges.push({
+      field: UserProfileChangeField.USER_EMAIL,
+      beforeValue: user.user_email ?? null,
+      afterValue: userEmail,
+      changeNote: changeNotes[UserProfileChangeField.USER_EMAIL] ?? null
+    });
+  }
+
+  for (const change of profileChanges) {
+    if (!change.changeNote) {
+      return fail(c, 400, `change note is required for ${change.field}`);
+    }
+  }
+
+  const usernameChanged = user.username !== username;
+  const hasAnyChange = usernameChanged || profileChanges.length > 0;
+  const now = getCurrentTimestamp();
+  const session = c.get("adminSession");
+
+  try {
+    if (hasAnyChange) {
+      await c.env.DB.prepare(
+        `UPDATE users
+         SET username = ?, system_email = ?, family_group_name = ?, user_email = ?, updated_at = ?
+         WHERE id = ?`
+      )
+        .bind(username, systemEmail, familyGroupName ?? null, userEmail, now, userId)
+        .run();
+    }
+
+    if (profileChanges.length > 0) {
+      const changeBatchId = crypto.randomUUID();
+      const statements = profileChanges.map((change) =>
+        c.env.DB.prepare(
+          `INSERT INTO user_profile_change_logs (
+            id,
+            change_batch_id,
+            user_id,
+            field_name,
+            before_value,
+            after_value,
+            change_note,
+            operator_admin_id,
+            created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+          .bind(
+            crypto.randomUUID(),
+            changeBatchId,
+            userId,
+            change.field,
+            change.beforeValue,
+            change.afterValue,
+            change.changeNote,
+            session.adminId,
+            now
+          )
+      );
+
+      await c.env.DB.batch(statements);
+    }
+  } catch (error) {
+    console.error("update user profile failed", error);
+    return fail(c, 500, "failed to update user");
+  }
+
+  const nextRow: UserRow = {
+    ...user,
+    username,
+    system_email: systemEmail,
+    family_group_name: familyGroupName ?? null,
+    user_email: userEmail,
+    updated_at: hasAnyChange ? now : user.updated_at
+  };
+  const payload: AdminUpdateUserResponseDTO = {
+    user: await toAdminUserDTO(nextRow, tokenSecret)
   };
 
   return ok(c, payload);
@@ -992,6 +1340,10 @@ app.post("/api/admin/users/:id/reset-token", async (c) => {
   if (!hasTokenVersionColumn) {
     return fail(c, 500, "token reset requires users.token_version migration");
   }
+  const hasUsersProfileColumns = await hasUsersExtraProfileColumns(c.env.DB);
+  const profileSelect = hasUsersProfileColumns
+    ? "system_email, family_group_name, user_email,"
+    : "NULL AS system_email, NULL AS family_group_name, NULL AS user_email,";
 
   const now = getCurrentTimestamp();
   const session = c.get("adminSession");
@@ -1001,7 +1353,8 @@ app.post("/api/admin/users/:id/reset-token", async (c) => {
       const user = await c.env.DB.prepare(
         `SELECT
           id,
-          remark_name,
+          username,
+          ${profileSelect}
           expire_at,
           created_at,
           token_version,
@@ -1072,7 +1425,10 @@ app.post("/api/admin/users/:id/reset-token", async (c) => {
       const payload: AdminResetUserTokenResponseDTO = {
         user: {
           id: user.id,
-          remarkName: user.remark_name,
+          username: user.username,
+          systemEmail: user.system_email ?? null,
+          familyGroupName: user.family_group_name ?? null,
+          userEmail: user.user_email ?? null,
           expireAt: user.expire_at,
           createdAt: user.created_at,
           updatedAt: now,
@@ -1103,7 +1459,7 @@ app.get("/api/admin/recharge-records", async (c) => {
       `SELECT
         r.id,
         r.user_id,
-        u.remark_name AS user_remark_name,
+        u.username AS username,
         r.change_days,
         r.reason,
         r.internal_note,
@@ -1127,7 +1483,7 @@ app.get("/api/admin/recharge-records", async (c) => {
       `SELECT
         r.id,
         r.user_id,
-        u.remark_name AS user_remark_name,
+        u.username AS username,
         r.change_days,
         r.reason,
         r.internal_note,
@@ -1154,6 +1510,47 @@ app.get("/api/admin/recharge-records", async (c) => {
   };
 
   return ok(c, payload);
+});
+
+app.get("/api/admin/user-profile-change-logs", async (c) => {
+  const rawLimit = Number(c.req.query("limit"));
+  const limit =
+    Number.isInteger(rawLimit) && rawLimit > 0
+      ? Math.min(rawLimit, MAX_PROFILE_CHANGE_LOG_LIMIT)
+      : DEFAULT_PROFILE_CHANGE_LOG_LIMIT;
+
+  try {
+    const rows = await c.env.DB.prepare(
+      `SELECT
+        l.id,
+        l.change_batch_id,
+        l.user_id,
+        u.username AS username,
+        l.field_name,
+        l.before_value,
+        l.after_value,
+        l.change_note,
+        l.operator_admin_id,
+        a.username AS operator_admin_username,
+        l.created_at
+      FROM user_profile_change_logs AS l
+      INNER JOIN users AS u ON u.id = l.user_id
+      INNER JOIN admin_users AS a ON a.id = l.operator_admin_id
+      ORDER BY l.created_at DESC, l.id DESC
+      LIMIT ?`
+    )
+      .bind(limit)
+      .all<UserProfileChangeLogRow>();
+    const payload: AdminListUserProfileChangeLogsResponseDTO = {
+      items: (rows.results || []).map((row) => toAdminUserProfileChangeRecordDTO(row)),
+      limit
+    };
+
+    return ok(c, payload);
+  } catch (error) {
+    console.error("list user profile change logs failed", error);
+    return fail(c, 500, "database migration required: user profile change logs table missing");
+  }
 });
 
 app.get("/api/admin/dashboard/today", async (c) => {

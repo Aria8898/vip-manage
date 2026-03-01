@@ -2,14 +2,18 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   RechargeReason,
   RechargeRecordSource,
+  UserProfileChangeField,
   type AdminCreateUserResponseDTO,
   type AdminDashboardTodayDTO,
+  type AdminListUserProfileChangeLogsResponseDTO,
   type AdminListRechargeRecordsResponseDTO,
   type AdminResetUserTokenResponseDTO,
   type AdminListUsersResponseDTO,
   type AdminRechargeRecordDTO,
   type AdminRechargeUserResponseDTO,
-  type AdminUserDTO
+  type AdminUpdateUserResponseDTO,
+  type AdminUserDTO,
+  type AdminUserProfileChangeRecordDTO
 } from "@vip/shared";
 import {
   Button,
@@ -36,7 +40,10 @@ import { apiRequest } from "../api/client";
 import { fetchAdminSession } from "../auth/session";
 
 interface CreateUserFormValues {
-  remarkName: string;
+  username: string;
+  systemEmail?: string;
+  familyGroupName?: string;
+  userEmail?: string;
 }
 
 interface RechargeFormValues {
@@ -50,6 +57,16 @@ interface BackfillFormValues {
   reason: RechargeReason;
   occurredAtInput: string;
   internalNote?: string;
+}
+
+interface UpdateUserFormValues {
+  username: string;
+  systemEmail?: string;
+  familyGroupName?: string;
+  userEmail?: string;
+  systemEmailNote?: string;
+  familyGroupNameNote?: string;
+  userEmailNote?: string;
 }
 
 const RECHARGE_REASON_LABELS: Record<RechargeReason, string> = {
@@ -66,10 +83,18 @@ const RECHARGE_SOURCE_LABELS: Record<RechargeRecordSource, string> = {
 };
 
 const MAX_INTERNAL_NOTE_LENGTH = 200;
+const MAX_PROFILE_CHANGE_NOTE_LENGTH = 200;
+
+const PROFILE_FIELD_LABELS: Record<UserProfileChangeField, string> = {
+  [UserProfileChangeField.SYSTEM_EMAIL]: "系统邮箱",
+  [UserProfileChangeField.FAMILY_GROUP_NAME]: "家庭组名称",
+  [UserProfileChangeField.USER_EMAIL]: "用户邮箱"
+};
 
 export const AdminShellPage = () => {
   const navigate = useNavigate();
   const [createUserForm] = Form.useForm<CreateUserFormValues>();
+  const [updateUserForm] = Form.useForm<UpdateUserFormValues>();
   const [rechargeForm] = Form.useForm<RechargeFormValues>();
   const [backfillForm] = Form.useForm<BackfillFormValues>();
   const [messageApi, messageContextHolder] = message.useMessage();
@@ -88,9 +113,14 @@ export const AdminShellPage = () => {
   const [loadingDashboard, setLoadingDashboard] = useState(false);
   const [rechargeRecords, setRechargeRecords] = useState<AdminRechargeRecordDTO[]>([]);
   const [loadingRechargeRecords, setLoadingRechargeRecords] = useState(false);
+  const [profileChangeLogs, setProfileChangeLogs] = useState<AdminUserProfileChangeRecordDTO[]>([]);
+  const [loadingProfileChangeLogs, setLoadingProfileChangeLogs] = useState(false);
   const [rechargeModalOpen, setRechargeModalOpen] = useState(false);
   const [submittingRecharge, setSubmittingRecharge] = useState(false);
   const [rechargeTargetUser, setRechargeTargetUser] = useState<AdminUserDTO | null>(null);
+  const [updateModalOpen, setUpdateModalOpen] = useState(false);
+  const [submittingUpdate, setSubmittingUpdate] = useState(false);
+  const [updateTargetUser, setUpdateTargetUser] = useState<AdminUserDTO | null>(null);
   const [backfillModalOpen, setBackfillModalOpen] = useState(false);
   const [submittingBackfill, setSubmittingBackfill] = useState(false);
   const [backfillTargetUser, setBackfillTargetUser] = useState<AdminUserDTO | null>(null);
@@ -146,6 +176,27 @@ export const AdminShellPage = () => {
     }
   }, [messageApi]);
 
+  const loadProfileChangeLogs = useCallback(async () => {
+    setLoadingProfileChangeLogs(true);
+
+    try {
+      const response = await apiRequest<AdminListUserProfileChangeLogsResponseDTO>(
+        "/admin/user-profile-change-logs",
+        {
+          method: "GET",
+          query: {
+            limit: 100
+          }
+        }
+      );
+      setProfileChangeLogs(response.data.items);
+    } catch (error) {
+      messageApi.error(error instanceof Error ? error.message : "加载资料变更记录失败");
+    } finally {
+      setLoadingProfileChangeLogs(false);
+    }
+  }, [messageApi]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -167,11 +218,12 @@ export const AdminShellPage = () => {
     void loadUsers("");
     void loadDashboard();
     void loadRechargeRecords();
+    void loadProfileChangeLogs();
 
     return () => {
       cancelled = true;
     };
-  }, [loadDashboard, loadRechargeRecords, loadUsers]);
+  }, [loadDashboard, loadProfileChangeLogs, loadRechargeRecords, loadUsers]);
 
   const handleLogout = async () => {
     setLoggingOut(true);
@@ -212,6 +264,10 @@ export const AdminShellPage = () => {
     return RECHARGE_SOURCE_LABELS[source] || source;
   }, []);
 
+  const formatProfileChangeField = useCallback((field: UserProfileChangeField) => {
+    return PROFILE_FIELD_LABELS[field] || field;
+  }, []);
+
   const toLocalDateTimeInput = useCallback((unixSeconds: number) => {
     const date = new Date(unixSeconds * 1000);
     const shifted = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
@@ -245,19 +301,121 @@ export const AdminShellPage = () => {
     backfillForm.resetFields();
   }, [backfillForm]);
 
+  const closeUpdateModal = useCallback(() => {
+    setUpdateModalOpen(false);
+    setUpdateTargetUser(null);
+    updateUserForm.resetFields();
+  }, [updateUserForm]);
+
+  const handleOpenUpdateModal = (user: AdminUserDTO) => {
+    setUpdateTargetUser(user);
+    setUpdateModalOpen(true);
+    updateUserForm.setFieldsValue({
+      username: user.username,
+      systemEmail: user.systemEmail || undefined,
+      familyGroupName: user.familyGroupName || undefined,
+      userEmail: user.userEmail || undefined,
+      systemEmailNote: "",
+      familyGroupNameNote: "",
+      userEmailNote: ""
+    });
+  };
+
+  const handleUpdateUserSubmit = async () => {
+    if (!updateTargetUser) {
+      return;
+    }
+
+    try {
+      const values = await updateUserForm.validateFields();
+      const username = values.username.trim();
+      if (!username) {
+        messageApi.error("请输入用户名");
+        return;
+      }
+
+      const systemEmail = values.systemEmail?.trim().toLowerCase() || undefined;
+      const familyGroupName = values.familyGroupName?.trim() || undefined;
+      const userEmail = values.userEmail?.trim().toLowerCase() || undefined;
+      const systemEmailChanged = (updateTargetUser.systemEmail ?? null) !== (systemEmail ?? null);
+      const familyGroupNameChanged =
+        (updateTargetUser.familyGroupName ?? null) !== (familyGroupName ?? null);
+      const userEmailChanged = (updateTargetUser.userEmail ?? null) !== (userEmail ?? null);
+
+      const systemEmailNote = values.systemEmailNote?.trim();
+      const familyGroupNameNote = values.familyGroupNameNote?.trim();
+      const userEmailNote = values.userEmailNote?.trim();
+      if (systemEmailChanged && !systemEmailNote) {
+        messageApi.error("系统邮箱变更时需要填写备注");
+        return;
+      }
+      if (familyGroupNameChanged && !familyGroupNameNote) {
+        messageApi.error("家庭组名称变更时需要填写备注");
+        return;
+      }
+      if (userEmailChanged && !userEmailNote) {
+        messageApi.error("用户邮箱变更时需要填写备注");
+        return;
+      }
+
+      const changeNotes: Partial<Record<UserProfileChangeField, string>> = {};
+      if (systemEmailChanged && systemEmailNote) {
+        changeNotes[UserProfileChangeField.SYSTEM_EMAIL] = systemEmailNote;
+      }
+      if (familyGroupNameChanged && familyGroupNameNote) {
+        changeNotes[UserProfileChangeField.FAMILY_GROUP_NAME] = familyGroupNameNote;
+      }
+      if (userEmailChanged && userEmailNote) {
+        changeNotes[UserProfileChangeField.USER_EMAIL] = userEmailNote;
+      }
+
+      setSubmittingUpdate(true);
+      const response = await apiRequest<AdminUpdateUserResponseDTO>(
+        `/admin/users/${encodeURIComponent(updateTargetUser.id)}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            username,
+            systemEmail,
+            familyGroupName,
+            userEmail,
+            changeNotes: Object.keys(changeNotes).length > 0 ? changeNotes : undefined
+          })
+        }
+      );
+
+      closeUpdateModal();
+      await Promise.all([loadUsers(activeQuery), loadProfileChangeLogs()]);
+      messageApi.success(`资料已更新：${response.data.user.username}`);
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "errorFields" in error) {
+        return;
+      }
+      messageApi.error(error instanceof Error ? error.message : "更新用户资料失败");
+    } finally {
+      setSubmittingUpdate(false);
+    }
+  };
+
   const handleCreateUserSubmit = async () => {
     try {
       const values = await createUserForm.validateFields();
-      const remarkName = values.remarkName.trim();
-      if (!remarkName) {
+      const username = values.username.trim();
+      if (!username) {
         return;
       }
+      const systemEmail = values.systemEmail?.trim().toLowerCase() || undefined;
+      const familyGroupName = values.familyGroupName?.trim() || undefined;
+      const userEmail = values.userEmail?.trim().toLowerCase() || undefined;
 
       setSubmittingCreate(true);
       const response = await apiRequest<AdminCreateUserResponseDTO>("/admin/users", {
         method: "POST",
         body: JSON.stringify({
-          remarkName
+          username,
+          systemEmail,
+          familyGroupName,
+          userEmail
         })
       });
 
@@ -270,7 +428,7 @@ export const AdminShellPage = () => {
       const statusLink = buildStatusLink(createdUser.statusToken);
       await navigator.clipboard.writeText(statusLink);
       setCopiedUserId(createdUser.id);
-      messageApi.success(`已创建并复制链接：${createdUser.remarkName}`);
+      messageApi.success(`已创建并复制链接：${createdUser.username}`);
     } catch (error) {
       if (typeof error === "object" && error !== null && "errorFields" in error) {
         return;
@@ -287,7 +445,7 @@ export const AdminShellPage = () => {
     try {
       await navigator.clipboard.writeText(statusLink);
       setCopiedUserId(user.id);
-      messageApi.success(`已复制链接：${user.remarkName}`);
+      messageApi.success(`已复制链接：${user.username}`);
     } catch (error) {
       messageApi.error(error instanceof Error ? error.message : "复制失败");
     }
@@ -328,7 +486,7 @@ export const AdminShellPage = () => {
       await navigator.clipboard.writeText(statusLink);
       setCopiedUserId(user.id);
       await loadUsers(activeQuery);
-      messageApi.success(`已重置并复制新链接：${user.remarkName}`);
+      messageApi.success(`已重置并复制新链接：${user.username}`);
     } catch (error) {
       messageApi.error(error instanceof Error ? error.message : "重置 Token 失败");
     } finally {
@@ -359,7 +517,7 @@ export const AdminShellPage = () => {
       closeRechargeModal();
       await Promise.all([loadUsers(activeQuery), loadDashboard(), loadRechargeRecords()]);
       messageApi.success(
-        `充值成功：${response.data.user.remarkName}，当前到期 ${formatUnixSeconds(response.data.user.expireAt)}`
+        `充值成功：${response.data.user.username}，当前到期 ${formatUnixSeconds(response.data.user.expireAt)}`
       );
     } catch (error) {
       if (typeof error === "object" && error !== null && "errorFields" in error) {
@@ -401,7 +559,7 @@ export const AdminShellPage = () => {
       closeBackfillModal();
       await Promise.all([loadUsers(activeQuery), loadDashboard(), loadRechargeRecords()]);
       messageApi.success(
-        `补录成功：${response.data.user.remarkName}，当前到期 ${formatUnixSeconds(response.data.user.expireAt)}`
+        `补录成功：${response.data.user.username}，当前到期 ${formatUnixSeconds(response.data.user.expireAt)}`
       );
     } catch (error) {
       if (typeof error === "object" && error !== null && "errorFields" in error) {
@@ -438,9 +596,27 @@ export const AdminShellPage = () => {
         render: (value: string) => <Typography.Text code>{value}</Typography.Text>
       },
       {
-        title: "备注名",
-        dataIndex: "remarkName",
-        key: "remarkName"
+        title: "用户名",
+        dataIndex: "username",
+        key: "username"
+      },
+      {
+        title: "家庭组名称",
+        dataIndex: "familyGroupName",
+        key: "familyGroupName",
+        render: (value: string | null) => value || "-"
+      },
+      {
+        title: "系统邮箱",
+        dataIndex: "systemEmail",
+        key: "systemEmail",
+        render: (value: string | null) => value || "-"
+      },
+      {
+        title: "用户邮箱",
+        dataIndex: "userEmail",
+        key: "userEmail",
+        render: (value: string | null) => value || "-"
       },
       {
         title: "状态",
@@ -469,12 +645,13 @@ export const AdminShellPage = () => {
       {
         title: "操作",
         key: "actions",
-        width: 420,
+        width: 500,
         render: (_, user) => (
           <Space size="small" wrap>
             <Button type={copiedUserId === user.id ? "default" : "primary"} onClick={() => handleCopyLink(user)}>
               {copiedUserId === user.id ? "已复制" : "复制链接"}
             </Button>
+            <Button onClick={() => handleOpenUpdateModal(user)}>编辑资料</Button>
             <Button onClick={() => handleOpenRechargeModal(user)}>充值</Button>
             <Button onClick={() => handleOpenBackfillModal(user)}>历史补录</Button>
             <Popconfirm
@@ -500,6 +677,7 @@ export const AdminShellPage = () => {
       handleCopyLink,
       handleOpenBackfillModal,
       handleOpenRechargeModal,
+      handleOpenUpdateModal,
       handleResetToken,
       resettingTokenUserId
     ]
@@ -530,12 +708,12 @@ export const AdminShellPage = () => {
       },
       {
         title: "用户",
-        dataIndex: "userRemarkName",
-        key: "userRemarkName",
+        dataIndex: "username",
+        key: "username",
         width: 220,
         render: (_, record) => (
           <Space direction="vertical" size={0}>
-            <Typography.Text>{record.userRemarkName}</Typography.Text>
+            <Typography.Text>{record.username}</Typography.Text>
             <Typography.Text type="secondary" code>
               {record.userId}
             </Typography.Text>
@@ -586,6 +764,69 @@ export const AdminShellPage = () => {
       }
     ],
     [formatRechargeReason, formatRechargeSource, formatUnixSeconds]
+  );
+
+  const profileChangeLogColumns = useMemo<ColumnsType<AdminUserProfileChangeRecordDTO>>(
+    () => [
+      {
+        title: "变更时间",
+        dataIndex: "createdAt",
+        key: "createdAt",
+        width: 180,
+        render: (value: number) => formatUnixSeconds(value)
+      },
+      {
+        title: "用户",
+        dataIndex: "username",
+        key: "username",
+        width: 220,
+        render: (_, record) => (
+          <Space direction="vertical" size={0}>
+            <Typography.Text>{record.username}</Typography.Text>
+            <Typography.Text type="secondary" code>
+              {record.userId}
+            </Typography.Text>
+          </Space>
+        )
+      },
+      {
+        title: "变更字段",
+        dataIndex: "field",
+        key: "field",
+        width: 140,
+        render: (value: UserProfileChangeField) => formatProfileChangeField(value)
+      },
+      {
+        title: "旧值",
+        dataIndex: "beforeValue",
+        key: "beforeValue",
+        width: 220,
+        ellipsis: true,
+        render: (value: string | null) => value || "-"
+      },
+      {
+        title: "新值",
+        dataIndex: "afterValue",
+        key: "afterValue",
+        width: 220,
+        ellipsis: true,
+        render: (value: string | null) => value || "-"
+      },
+      {
+        title: "变更备注",
+        dataIndex: "changeNote",
+        key: "changeNote",
+        width: 260,
+        ellipsis: true
+      },
+      {
+        title: "操作管理员",
+        dataIndex: "operatorAdminUsername",
+        key: "operatorAdminUsername",
+        width: 140
+      }
+    ],
+    [formatProfileChangeField, formatUnixSeconds]
   );
 
   return (
@@ -641,7 +882,7 @@ export const AdminShellPage = () => {
           <Input.Search
             value={searchQueryInput}
             allowClear
-            placeholder="按备注名或用户 ID 搜索"
+            placeholder="按用户名或用户 ID 搜索"
             enterButton="搜索"
             onChange={(event) => setSearchQueryInput(event.target.value)}
             onSearch={(value) => {
@@ -660,7 +901,7 @@ export const AdminShellPage = () => {
             pageSize: 20,
             showSizeChanger: false
           }}
-          scroll={{ x: 1200 }}
+          scroll={{ x: 1600 }}
         />
       </Card>
 
@@ -687,6 +928,29 @@ export const AdminShellPage = () => {
         />
       </Card>
 
+      <Card className="admin-records-card" bordered={false}>
+        <div className="admin-toolbar-row">
+          <Typography.Title level={5} style={{ margin: 0 }}>
+            资料变更记录（最近 {profileChangeLogs.length} 条）
+          </Typography.Title>
+          <Button onClick={() => void loadProfileChangeLogs()} loading={loadingProfileChangeLogs}>
+            刷新记录
+          </Button>
+        </div>
+
+        <Table<AdminUserProfileChangeRecordDTO>
+          rowKey="id"
+          loading={loadingProfileChangeLogs}
+          columns={profileChangeLogColumns}
+          dataSource={profileChangeLogs}
+          pagination={{
+            pageSize: 10,
+            showSizeChanger: false
+          }}
+          scroll={{ x: 1600 }}
+        />
+      </Card>
+
       <Modal
         title="新增用户"
         open={createModalOpen}
@@ -703,12 +967,12 @@ export const AdminShellPage = () => {
       >
         <Form<CreateUserFormValues> layout="vertical" form={createUserForm}>
           <Form.Item
-            label="用户备注名"
-            name="remarkName"
+            label="用户名"
+            name="username"
             rules={[
               {
                 required: true,
-                message: "请输入用户备注名"
+                message: "请输入用户名"
               },
               {
                 max: 80,
@@ -718,7 +982,188 @@ export const AdminShellPage = () => {
           >
             <Input placeholder="例如：微信名-大刘" />
           </Form.Item>
+          <Form.Item
+            label="系统邮箱"
+            name="systemEmail"
+            rules={[
+              {
+                type: "email",
+                message: "请输入有效邮箱"
+              },
+              {
+                max: 120,
+                message: "最多 120 个字符"
+              }
+            ]}
+          >
+            <Input placeholder="可选，例如：ops@company.com" />
+          </Form.Item>
+          <Form.Item
+            label="家庭组名称"
+            name="familyGroupName"
+            rules={[
+              {
+                max: 80,
+                message: "最多 80 个字符"
+              }
+            ]}
+          >
+            <Input placeholder="可选，例如：Unisat CRM" />
+          </Form.Item>
+          <Form.Item
+            label="用户邮箱"
+            name="userEmail"
+            rules={[
+              {
+                type: "email",
+                message: "请输入有效邮箱"
+              },
+              {
+                max: 120,
+                message: "最多 120 个字符"
+              }
+            ]}
+          >
+            <Input placeholder="可选，例如：user@example.com" />
+          </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        title="编辑用户资料"
+        open={updateModalOpen}
+        okText="保存修改"
+        cancelText="取消"
+        confirmLoading={submittingUpdate}
+        onOk={() => {
+          void handleUpdateUserSubmit();
+        }}
+        onCancel={closeUpdateModal}
+      >
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          <Card size="small">
+            <Typography.Text>
+              用户：{updateTargetUser?.username || "-"}（{updateTargetUser?.id || "-"}）
+            </Typography.Text>
+          </Card>
+
+          <Form<UpdateUserFormValues> layout="vertical" form={updateUserForm}>
+            <Form.Item
+              label="用户名"
+              name="username"
+              rules={[
+                {
+                  required: true,
+                  message: "请输入用户名"
+                },
+                {
+                  max: 80,
+                  message: "最多 80 个字符"
+                }
+              ]}
+            >
+              <Input placeholder="例如：微信名-大刘" />
+            </Form.Item>
+
+            <Form.Item
+              label="系统邮箱"
+              name="systemEmail"
+              rules={[
+                {
+                  type: "email",
+                  message: "请输入有效邮箱"
+                },
+                {
+                  max: 120,
+                  message: "最多 120 个字符"
+                }
+              ]}
+            >
+              <Input placeholder="可选，例如：ops@company.com" />
+            </Form.Item>
+            <Form.Item
+              label="系统邮箱变更备注"
+              name="systemEmailNote"
+              rules={[
+                {
+                  max: MAX_PROFILE_CHANGE_NOTE_LENGTH,
+                  message: `最多 ${MAX_PROFILE_CHANGE_NOTE_LENGTH} 个字符`
+                }
+              ]}
+            >
+              <Input.TextArea
+                rows={2}
+                showCount
+                maxLength={MAX_PROFILE_CHANGE_NOTE_LENGTH}
+                placeholder="仅在系统邮箱发生变更时必填"
+              />
+            </Form.Item>
+
+            <Form.Item
+              label="家庭组名称"
+              name="familyGroupName"
+              rules={[
+                {
+                  max: 80,
+                  message: "最多 80 个字符"
+                }
+              ]}
+            >
+              <Input placeholder="可选，例如：Unisat CRM" />
+            </Form.Item>
+            <Form.Item
+              label="家庭组名称变更备注"
+              name="familyGroupNameNote"
+              rules={[
+                {
+                  max: MAX_PROFILE_CHANGE_NOTE_LENGTH,
+                  message: `最多 ${MAX_PROFILE_CHANGE_NOTE_LENGTH} 个字符`
+                }
+              ]}
+            >
+              <Input.TextArea
+                rows={2}
+                showCount
+                maxLength={MAX_PROFILE_CHANGE_NOTE_LENGTH}
+                placeholder="仅在家庭组名称发生变更时必填"
+              />
+            </Form.Item>
+
+            <Form.Item
+              label="用户邮箱"
+              name="userEmail"
+              rules={[
+                {
+                  type: "email",
+                  message: "请输入有效邮箱"
+                },
+                {
+                  max: 120,
+                  message: "最多 120 个字符"
+                }
+              ]}
+            >
+              <Input placeholder="可选，例如：user@example.com" />
+            </Form.Item>
+            <Form.Item
+              label="用户邮箱变更备注"
+              name="userEmailNote"
+              rules={[
+                {
+                  max: MAX_PROFILE_CHANGE_NOTE_LENGTH,
+                  message: `最多 ${MAX_PROFILE_CHANGE_NOTE_LENGTH} 个字符`
+                }
+              ]}
+            >
+              <Input.TextArea
+                rows={2}
+                showCount
+                maxLength={MAX_PROFILE_CHANGE_NOTE_LENGTH}
+                placeholder="仅在用户邮箱发生变更时必填"
+              />
+            </Form.Item>
+          </Form>
+        </Space>
       </Modal>
 
       <Modal
@@ -735,7 +1180,7 @@ export const AdminShellPage = () => {
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
           <Card size="small">
             <Typography.Text>
-              充值用户：{rechargeTargetUser?.remarkName || "-"}（{rechargeTargetUser?.id || "-"}）
+              充值用户：{rechargeTargetUser?.username || "-"}（{rechargeTargetUser?.id || "-"}）
             </Typography.Text>
             <br />
             <Typography.Text type="secondary">
@@ -800,7 +1245,7 @@ export const AdminShellPage = () => {
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
           <Card size="small">
             <Typography.Text>
-              补录用户：{backfillTargetUser?.remarkName || "-"}（{backfillTargetUser?.id || "-"}）
+              补录用户：{backfillTargetUser?.username || "-"}（{backfillTargetUser?.id || "-"}）
             </Typography.Text>
             <br />
             <Typography.Text type="secondary">

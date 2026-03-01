@@ -118,7 +118,7 @@ export const StatusShellPage = () => {
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
             <div>
               <Typography.Title level={3} style={{ marginBottom: 8 }}>
-                你好，{statusData.user.remarkName}
+                你好，{statusData.user.username}
               </Typography.Title>
               <Space wrap>
                 {isActive ? (

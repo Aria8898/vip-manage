@@ -1,7 +1,8 @@
 import type {
   MembershipStatus,
   RechargeReason,
-  RechargeRecordSource
+  RechargeRecordSource,
+  UserProfileChangeField
 } from "../enums/common";
 
 export interface HealthDTO {
@@ -29,15 +30,21 @@ export interface AdminSessionDTO {
 
 export interface UserSummaryDTO {
   id: string;
-  remarkName: string;
+  username: string;
   expireAt: number;
 }
 
 export interface AdminCreateUserRequestDTO {
-  remarkName: string;
+  username: string;
+  systemEmail?: string;
+  familyGroupName?: string;
+  userEmail?: string;
 }
 
 export interface AdminUserDTO extends UserSummaryDTO {
+  systemEmail: string | null;
+  familyGroupName: string | null;
+  userEmail: string | null;
   createdAt: number;
   updatedAt: number;
   tokenVersion: number;
@@ -53,6 +60,37 @@ export interface AdminListUsersResponseDTO {
   query: string;
 }
 
+export interface AdminUpdateUserRequestDTO {
+  username: string;
+  systemEmail?: string;
+  familyGroupName?: string;
+  userEmail?: string;
+  changeNotes?: Partial<Record<UserProfileChangeField, string>>;
+}
+
+export interface AdminUpdateUserResponseDTO {
+  user: AdminUserDTO;
+}
+
+export interface AdminUserProfileChangeRecordDTO {
+  id: string;
+  changeBatchId: string;
+  userId: string;
+  username: string;
+  field: UserProfileChangeField;
+  beforeValue: string | null;
+  afterValue: string | null;
+  changeNote: string;
+  operatorAdminId: string;
+  operatorAdminUsername: string;
+  createdAt: number;
+}
+
+export interface AdminListUserProfileChangeLogsResponseDTO {
+  items: AdminUserProfileChangeRecordDTO[];
+  limit: number;
+}
+
 export interface AdminRechargeUserRequestDTO {
   days: number;
   reason: RechargeReason;
@@ -62,7 +100,7 @@ export interface AdminRechargeUserRequestDTO {
 export interface AdminRechargeRecordDTO {
   id: string;
   userId: string;
-  userRemarkName: string;
+  username: string;
   changeDays: number;
   reason: RechargeReason;
   internalNote: string | null;
