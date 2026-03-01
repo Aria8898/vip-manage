@@ -70,6 +70,7 @@ const MAX_USERNAME_LENGTH = 80;
 const MAX_FAMILY_GROUP_NAME_LENGTH = 80;
 const MAX_EMAIL_LENGTH = 120;
 const MAX_INTERNAL_NOTE_LENGTH = 200;
+const MAX_EXTERNAL_NOTE_LENGTH = 200;
 const MAX_PROFILE_CHANGE_NOTE_LENGTH = 200;
 const MAX_RECHARGE_DAYS = 3650;
 const MAX_PAYMENT_AMOUNT = 1000000;
@@ -115,6 +116,7 @@ interface RechargeRecordRow {
   reason: string;
   payment_amount_cents: number | null;
   internal_note: string | null;
+  external_note: string | null;
   expire_before: number;
   expire_after: number;
   operator_admin_id: string;
@@ -167,6 +169,7 @@ interface UserStatusHistoryRow {
   id: string;
   change_days: number;
   reason: string;
+  external_note: string | null;
   expire_before: number;
   expire_after: number;
   occurred_at: number | null;
@@ -190,6 +193,7 @@ type AppContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 let cachedHasUsersTokenVersionColumn: boolean | null = null;
 let cachedHasUsersExtraProfileColumns: boolean | null = null;
 let cachedHasRechargeTimelineColumns: boolean | null = null;
+let cachedHasRechargeExternalNoteColumn: boolean | null = null;
 
 const getCurrentTimestamp = (): number => Math.floor(Date.now() / 1000);
 
@@ -368,6 +372,18 @@ const hasRechargeTimelineColumns = async (db: D1Database): Promise<boolean> => {
   return hasColumns;
 };
 
+const hasRechargeExternalNoteColumn = async (db: D1Database): Promise<boolean> => {
+  if (cachedHasRechargeExternalNoteColumn !== null) {
+    return cachedHasRechargeExternalNoteColumn;
+  }
+
+  const rows = await db.prepare("PRAGMA table_info(recharge_records)").all<SqliteTableInfoRow>();
+  const hasColumn = (rows.results || []).some((row) => row.name === "external_note");
+  cachedHasRechargeExternalNoteColumn = hasColumn;
+
+  return hasColumn;
+};
+
 const normalizeInternalNote = (value: unknown): string | null => {
   if (typeof value !== "string") {
     return null;
@@ -473,6 +489,7 @@ const toAdminRechargeRecordDTO = (row: RechargeRecordRow): AdminRechargeRecordDT
   reason: toRechargeReason(row.reason),
   paymentAmount: toPaymentAmount(row.payment_amount_cents),
   internalNote: row.internal_note,
+  externalNote: row.external_note,
   expireBefore: row.expire_before,
   expireAfter: row.expire_after,
   operatorAdminId: row.operator_admin_id,
@@ -505,6 +522,7 @@ const toUserStatusHistoryRecordDTO = (
   id: row.id,
   changeDays: row.change_days,
   reason: toRechargeReason(row.reason),
+  externalNote: row.external_note,
   expireBefore: row.expire_before,
   expireAfter: row.expire_after,
   createdAt: row.occurred_at && row.occurred_at > 0 ? row.occurred_at : row.created_at
@@ -532,6 +550,20 @@ const requireRechargeTimelineColumns = async (
     return {
       ok: false,
       response: fail(c, 500, "database migration required: recharge record columns missing")
+    };
+  }
+
+  return { ok: true };
+};
+
+const requireRechargeExternalNoteColumn = async (
+  c: AppContext
+): Promise<{ ok: true } | { ok: false; response: Response }> => {
+  const hasColumn = await hasRechargeExternalNoteColumn(c.env.DB);
+  if (!hasColumn) {
+    return {
+      ok: false,
+      response: fail(c, 500, "database migration required: recharge_records.external_note column missing")
     };
   }
 
@@ -591,6 +623,7 @@ const createAndRebuildRechargeRecord = async (
     reason: RechargeReason;
     paymentAmountCents: number;
     internalNote: string | null;
+    externalNote: string | null;
     occurredAt: number;
     source: RechargeRecordSource;
   }
@@ -616,6 +649,7 @@ const createAndRebuildRechargeRecord = async (
       reason,
       payment_amount_cents,
       internal_note,
+      external_note,
       expire_before,
       expire_after,
       operator_admin_id,
@@ -623,7 +657,7 @@ const createAndRebuildRechargeRecord = async (
       occurred_at,
       recorded_at,
       source
-    ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)`
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)`
   )
     .bind(
       recordId,
@@ -632,6 +666,7 @@ const createAndRebuildRechargeRecord = async (
       params.reason,
       params.paymentAmountCents,
       params.internalNote,
+      params.externalNote,
       session.adminId,
       now,
       params.occurredAt,
@@ -650,6 +685,7 @@ const createAndRebuildRechargeRecord = async (
       r.reason,
       r.payment_amount_cents,
       r.internal_note,
+      r.external_note,
       r.expire_before,
       r.expire_after,
       r.operator_admin_id,
@@ -795,12 +831,17 @@ app.get("/api/status/:token", async (c) => {
     .first<UserTotalChangeDaysRow>();
 
   const hasRechargeTimeline = await hasRechargeTimelineColumns(c.env.DB);
+  const hasRechargeExternalNote = await hasRechargeExternalNoteColumn(c.env.DB);
+  const externalNoteSelect = hasRechargeExternalNote
+    ? "external_note"
+    : "NULL AS external_note";
   const historyRows = hasRechargeTimeline
     ? await c.env.DB.prepare(
       `SELECT
         id,
         change_days,
         reason,
+        ${externalNoteSelect},
         expire_before,
         expire_after,
         occurred_at,
@@ -817,6 +858,7 @@ app.get("/api/status/:token", async (c) => {
         id,
         change_days,
         reason,
+        NULL AS external_note,
         expire_before,
         expire_after,
         NULL AS occurred_at,
@@ -1284,12 +1326,17 @@ app.post("/api/admin/users/:id/recharge", async (c) => {
   if (!migrationCheck.ok) {
     return migrationCheck.response;
   }
+  const externalNoteMigrationCheck = await requireRechargeExternalNoteColumn(c);
+  if (!externalNoteMigrationCheck.ok) {
+    return externalNoteMigrationCheck.response;
+  }
 
   const body = await c.req.json<Partial<AdminRechargeUserRequestDTO>>().catch(() => null);
   const days = Number(body?.days);
   const reasonRaw = typeof body?.reason === "string" ? body.reason : "";
   const paymentAmount = normalizePaymentAmount(body?.paymentAmount);
   const internalNote = normalizeInternalNote(body?.internalNote);
+  const externalNote = normalizeInternalNote(body?.externalNote);
 
   if (!Number.isInteger(days) || days <= 0 || days > MAX_RECHARGE_DAYS) {
     return fail(c, 400, `days must be an integer between 1 and ${MAX_RECHARGE_DAYS}`);
@@ -1303,6 +1350,9 @@ app.post("/api/admin/users/:id/recharge", async (c) => {
   if (internalNote && internalNote.length > MAX_INTERNAL_NOTE_LENGTH) {
     return fail(c, 400, `internalNote must be <= ${MAX_INTERNAL_NOTE_LENGTH} chars`);
   }
+  if (externalNote && externalNote.length > MAX_EXTERNAL_NOTE_LENGTH) {
+    return fail(c, 400, `externalNote must be <= ${MAX_EXTERNAL_NOTE_LENGTH} chars`);
+  }
 
   try {
     const now = getCurrentTimestamp();
@@ -1312,6 +1362,7 @@ app.post("/api/admin/users/:id/recharge", async (c) => {
       reason: reasonRaw,
       paymentAmountCents: toPaymentAmountCents(paymentAmount),
       internalNote,
+      externalNote,
       occurredAt: now,
       source: RechargeRecordSource.NORMAL
     });
@@ -1336,6 +1387,10 @@ app.post("/api/admin/users/:id/recharge/backfill", async (c) => {
   if (!migrationCheck.ok) {
     return migrationCheck.response;
   }
+  const externalNoteMigrationCheck = await requireRechargeExternalNoteColumn(c);
+  if (!externalNoteMigrationCheck.ok) {
+    return externalNoteMigrationCheck.response;
+  }
 
   const body = await c.req.json<Partial<AdminBackfillRechargeRequestDTO>>().catch(() => null);
   const days = Number(body?.days);
@@ -1343,6 +1398,7 @@ app.post("/api/admin/users/:id/recharge/backfill", async (c) => {
   const paymentAmount = normalizePaymentAmount(body?.paymentAmount);
   const occurredAt = Number(body?.occurredAt);
   const internalNote = normalizeInternalNote(body?.internalNote);
+  const externalNote = normalizeInternalNote(body?.externalNote);
   const now = getCurrentTimestamp();
 
   if (!Number.isInteger(days) || days <= 0 || days > MAX_RECHARGE_DAYS) {
@@ -1363,6 +1419,9 @@ app.post("/api/admin/users/:id/recharge/backfill", async (c) => {
   if (internalNote && internalNote.length > MAX_INTERNAL_NOTE_LENGTH) {
     return fail(c, 400, `internalNote must be <= ${MAX_INTERNAL_NOTE_LENGTH} chars`);
   }
+  if (externalNote && externalNote.length > MAX_EXTERNAL_NOTE_LENGTH) {
+    return fail(c, 400, `externalNote must be <= ${MAX_EXTERNAL_NOTE_LENGTH} chars`);
+  }
 
   try {
     const payload = await createAndRebuildRechargeRecord(c, {
@@ -1371,6 +1430,7 @@ app.post("/api/admin/users/:id/recharge/backfill", async (c) => {
       reason: reasonRaw,
       paymentAmountCents: toPaymentAmountCents(paymentAmount),
       internalNote,
+      externalNote,
       occurredAt,
       source: RechargeRecordSource.BACKFILL
     });
@@ -1514,6 +1574,10 @@ app.get("/api/admin/recharge-records", async (c) => {
       ? Math.min(rawLimit, MAX_RECHARGE_RECORD_LIMIT)
       : DEFAULT_RECHARGE_RECORD_LIMIT;
   const hasRechargeTimeline = await hasRechargeTimelineColumns(c.env.DB);
+  const hasRechargeExternalNote = await hasRechargeExternalNoteColumn(c.env.DB);
+  const externalNoteSelect = hasRechargeExternalNote
+    ? "r.external_note AS external_note"
+    : "NULL AS external_note";
   const rows = hasRechargeTimeline
     ? await c.env.DB.prepare(
       `SELECT
@@ -1524,6 +1588,7 @@ app.get("/api/admin/recharge-records", async (c) => {
         r.reason,
         r.payment_amount_cents,
         r.internal_note,
+        ${externalNoteSelect},
         r.expire_before,
         r.expire_after,
         r.operator_admin_id,
@@ -1549,6 +1614,7 @@ app.get("/api/admin/recharge-records", async (c) => {
         r.reason,
         0 AS payment_amount_cents,
         r.internal_note,
+        NULL AS external_note,
         r.expire_before,
         r.expire_after,
         r.operator_admin_id,

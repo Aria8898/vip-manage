@@ -51,6 +51,7 @@ interface RechargeFormValues {
   reason: RechargeReason;
   paymentAmount: number;
   internalNote?: string;
+  externalNote?: string;
 }
 
 interface BackfillFormValues {
@@ -59,6 +60,7 @@ interface BackfillFormValues {
   paymentAmount: number;
   occurredAtInput: string;
   internalNote?: string;
+  externalNote?: string;
 }
 
 interface UpdateUserFormValues {
@@ -87,6 +89,7 @@ const RECHARGE_SOURCE_LABELS: Record<RechargeRecordSource, string> = {
 };
 
 const MAX_INTERNAL_NOTE_LENGTH = 200;
+const MAX_EXTERNAL_NOTE_LENGTH = 200;
 const MAX_PROFILE_CHANGE_NOTE_LENGTH = 200;
 
 const PROFILE_FIELD_LABELS: Record<UserProfileChangeField, string> = {
@@ -466,7 +469,8 @@ export const AdminShellPage = () => {
       days: 30,
       reason: RechargeReason.WECHAT_PAY,
       paymentAmount: 0,
-      internalNote: ""
+      internalNote: "",
+      externalNote: ""
     });
   };
 
@@ -478,7 +482,8 @@ export const AdminShellPage = () => {
       reason: RechargeReason.WECHAT_PAY,
       paymentAmount: 0,
       occurredAtInput: toLocalDateTimeInput(Math.floor(Date.now() / 1000)),
-      internalNote: ""
+      internalNote: "",
+      externalNote: ""
     });
   };
 
@@ -520,7 +525,8 @@ export const AdminShellPage = () => {
             days: values.days,
             reason: values.reason,
             paymentAmount: values.paymentAmount,
-            internalNote: values.internalNote?.trim() || undefined
+            internalNote: values.internalNote?.trim() || undefined,
+            externalNote: values.externalNote?.trim() || undefined
           })
         }
       );
@@ -563,7 +569,8 @@ export const AdminShellPage = () => {
             reason: values.reason,
             paymentAmount: values.paymentAmount,
             occurredAt,
-            internalNote: values.internalNote?.trim() || undefined
+            internalNote: values.internalNote?.trim() || undefined,
+            externalNote: values.externalNote?.trim() || undefined
           })
         }
       );
@@ -771,6 +778,14 @@ export const AdminShellPage = () => {
         title: "内部备注",
         dataIndex: "internalNote",
         key: "internalNote",
+        width: 220,
+        ellipsis: true,
+        render: (value: string | null) => value || "-"
+      },
+      {
+        title: "外部备注",
+        dataIndex: "externalNote",
+        key: "externalNote",
         width: 220,
         ellipsis: true,
         render: (value: string | null) => value || "-"
@@ -1256,12 +1271,20 @@ export const AdminShellPage = () => {
                 placeholder="例如：99.00"
               />
             </Form.Item>
-            <Form.Item label="内部备注" name="internalNote">
+            <Form.Item label="内部备注（仅管理员可见）" name="internalNote">
               <Input.TextArea
                 maxLength={MAX_INTERNAL_NOTE_LENGTH}
                 showCount
                 rows={3}
-                placeholder="可选，用于记录转账单号、订单备注等"
+                placeholder="可选，仅后台管理员可见，用于记录转账单号、核对信息等"
+              />
+            </Form.Item>
+            <Form.Item label="外部备注（用户端可见）" name="externalNote">
+              <Input.TextArea
+                maxLength={MAX_EXTERNAL_NOTE_LENGTH}
+                showCount
+                rows={3}
+                placeholder="可选，用户状态页会展示该备注"
               />
             </Form.Item>
           </Form>
@@ -1355,12 +1378,20 @@ export const AdminShellPage = () => {
                 placeholder="例如：99.00"
               />
             </Form.Item>
-            <Form.Item label="内部备注" name="internalNote">
+            <Form.Item label="内部备注（仅管理员可见）" name="internalNote">
               <Input.TextArea
                 maxLength={MAX_INTERNAL_NOTE_LENGTH}
                 showCount
                 rows={3}
-                placeholder="可选，建议记录外部系统单号或原始凭证"
+                placeholder="可选，仅后台管理员可见，建议记录外部系统单号或原始凭证"
+              />
+            </Form.Item>
+            <Form.Item label="外部备注（用户端可见）" name="externalNote">
+              <Input.TextArea
+                maxLength={MAX_EXTERNAL_NOTE_LENGTH}
+                showCount
+                rows={3}
+                placeholder="可选，用户状态页会展示该备注"
               />
             </Form.Item>
           </Form>

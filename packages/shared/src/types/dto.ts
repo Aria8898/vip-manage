@@ -96,6 +96,7 @@ export interface AdminRechargeUserRequestDTO {
   reason: RechargeReason;
   paymentAmount: number;
   internalNote?: string;
+  externalNote?: string;
 }
 
 export interface AdminRechargeRecordDTO {
@@ -106,6 +107,7 @@ export interface AdminRechargeRecordDTO {
   reason: RechargeReason;
   paymentAmount: number;
   internalNote: string | null;
+  externalNote: string | null;
   expireBefore: number;
   expireAfter: number;
   operatorAdminId: string;
@@ -129,6 +131,7 @@ export interface AdminBackfillRechargeRequestDTO {
   paymentAmount: number;
   occurredAt: number;
   internalNote?: string;
+  externalNote?: string;
 }
 
 export interface AdminListRechargeRecordsResponseDTO {
@@ -151,6 +154,7 @@ export interface UserStatusHistoryRecordDTO {
   id: string;
   changeDays: number;
   reason: RechargeReason;
+  externalNote: string | null;
   expireBefore: number;
   expireAfter: number;
   createdAt: number;

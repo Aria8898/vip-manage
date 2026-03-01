@@ -196,6 +196,11 @@ export const StatusShellPage = () => {
               children: (
                 <Space direction="vertical" size={0}>
                   <Typography.Text>{formatHistoryItem(item)}</Typography.Text>
+                  {item.externalNote ? (
+                    <Typography.Text type="secondary">
+                      {item.externalNote}
+                    </Typography.Text>
+                  ) : null}
                   <Typography.Text type="secondary">
                     {formatUnixSeconds(item.createdAt)}
                   </Typography.Text>
