@@ -1,16 +1,35 @@
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   AdminCreateUserResponseDTO,
   AdminListUsersResponseDTO,
   AdminUserDTO
 } from "@vip/shared";
+import {
+  Button,
+  Card,
+  Form,
+  Input,
+  Modal,
+  Space,
+  Table,
+  Tag,
+  Typography,
+  message
+} from "antd";
+import type { ColumnsType } from "antd/es/table";
 import { useNavigate } from "react-router-dom";
 
 import { apiRequest } from "../api/client";
 import { fetchAdminSession } from "../auth/session";
 
+interface CreateUserFormValues {
+  remarkName: string;
+}
+
 export const AdminShellPage = () => {
   const navigate = useNavigate();
+  const [form] = Form.useForm<CreateUserFormValues>();
+  const [messageApi, messageContextHolder] = message.useMessage();
   const [username, setUsername] = useState<string>("-");
   const [expiresAt, setExpiresAt] = useState<number>(0);
   const [loggingOut, setLoggingOut] = useState(false);
@@ -18,15 +37,13 @@ export const AdminShellPage = () => {
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [searchQueryInput, setSearchQueryInput] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
-  const [newRemarkName, setNewRemarkName] = useState("");
-  const [creatingUser, setCreatingUser] = useState(false);
+  const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [submittingCreate, setSubmittingCreate] = useState(false);
   const [copiedUserId, setCopiedUserId] = useState("");
-  const [noticeMessage, setNoticeMessage] = useState("");
-  const [errorMessage, setErrorMessage] = useState("");
+  const [sessionErrorMessage, setSessionErrorMessage] = useState("");
 
   const loadUsers = useCallback(async (query: string) => {
     setLoadingUsers(true);
-    setErrorMessage("");
 
     try {
       const response = await apiRequest<AdminListUsersResponseDTO>("/admin/users", {
@@ -36,11 +53,11 @@ export const AdminShellPage = () => {
       setUsers(response.data.items);
       setActiveQuery(response.data.query);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "加载用户列表失败");
+      messageApi.error(error instanceof Error ? error.message : "加载用户列表失败");
     } finally {
       setLoadingUsers(false);
     }
-  }, []);
+  }, [messageApi]);
 
   useEffect(() => {
     let cancelled = false;
@@ -54,7 +71,7 @@ export const AdminShellPage = () => {
         }
       } catch (error) {
         if (!cancelled) {
-          setErrorMessage(error instanceof Error ? error.message : "加载会话失败");
+          setSessionErrorMessage(error instanceof Error ? error.message : "加载会话失败");
         }
       }
     };
@@ -69,7 +86,6 @@ export const AdminShellPage = () => {
 
   const handleLogout = async () => {
     setLoggingOut(true);
-    setErrorMessage("");
 
     try {
       await apiRequest("/admin/logout", {
@@ -77,7 +93,7 @@ export const AdminShellPage = () => {
       });
       navigate("/admin/login", { replace: true });
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "退出失败");
+      messageApi.error(error instanceof Error ? error.message : "退出失败");
     } finally {
       setLoggingOut(false);
     }
@@ -99,25 +115,21 @@ export const AdminShellPage = () => {
     return `${window.location.origin}/status/${encodedToken}?t=${encodedToken}`;
   }, []);
 
-  const handleSearchSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    void loadUsers(searchQueryInput.trim());
+  const handleSearch = async (query: string) => {
+    const normalized = query.trim();
+    setSearchQueryInput(normalized);
+    await loadUsers(normalized);
   };
 
-  const handleCreateUser = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const remarkName = newRemarkName.trim();
-
-    if (!remarkName) {
-      setErrorMessage("请输入用户备注名");
-      return;
-    }
-
-    setCreatingUser(true);
-    setNoticeMessage("");
-    setErrorMessage("");
-
+  const handleCreateUserSubmit = async () => {
     try {
+      const values = await form.validateFields();
+      const remarkName = values.remarkName.trim();
+      if (!remarkName) {
+        return;
+      }
+
+      setSubmittingCreate(true);
       const response = await apiRequest<AdminCreateUserResponseDTO>("/admin/users", {
         method: "POST",
         body: JSON.stringify({
@@ -126,31 +138,34 @@ export const AdminShellPage = () => {
       });
 
       const createdUser = response.data.user;
-      setUsers((previous) => [createdUser, ...previous]);
-      setNewRemarkName("");
-      setNoticeMessage(`已创建用户 ${createdUser.remarkName}`);
+      form.resetFields();
+      setCreateModalOpen(false);
+      setSearchQueryInput("");
+      await loadUsers("");
+
       const statusLink = buildStatusLink(createdUser.statusToken);
       await navigator.clipboard.writeText(statusLink);
       setCopiedUserId(createdUser.id);
-      setNoticeMessage(`已创建并复制链接：${createdUser.remarkName}`);
+      messageApi.success(`已创建并复制链接：${createdUser.remarkName}`);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "创建用户失败");
+      if (error instanceof Error && "errorFields" in error) {
+        return;
+      }
+      messageApi.error(error instanceof Error ? error.message : "创建用户失败");
     } finally {
-      setCreatingUser(false);
+      setSubmittingCreate(false);
     }
   };
 
   const handleCopyLink = async (user: AdminUserDTO) => {
     const statusLink = buildStatusLink(user.statusToken);
-    setErrorMessage("");
-    setNoticeMessage("");
 
     try {
       await navigator.clipboard.writeText(statusLink);
       setCopiedUserId(user.id);
-      setNoticeMessage(`已复制链接：${user.remarkName}`);
+      messageApi.success(`已复制链接：${user.remarkName}`);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "复制失败");
+      messageApi.error(error instanceof Error ? error.message : "复制失败");
     }
   };
 
@@ -159,102 +174,150 @@ export const AdminShellPage = () => {
     return `${prefix}：${users.length} 条`;
   }, [activeQuery, users.length]);
 
+  const columns = useMemo<ColumnsType<AdminUserDTO>>(
+    () => [
+      {
+        title: "用户 ID",
+        dataIndex: "id",
+        key: "id",
+        ellipsis: true,
+        render: (value: string) => <Typography.Text code>{value}</Typography.Text>
+      },
+      {
+        title: "备注名",
+        dataIndex: "remarkName",
+        key: "remarkName"
+      },
+      {
+        title: "状态",
+        dataIndex: "expireAt",
+        key: "status",
+        width: 120,
+        render: (expireAt: number) =>
+          expireAt > Math.floor(Date.now() / 1000) ? (
+            <Tag color="green">有效</Tag>
+          ) : (
+            <Tag color="default">未生效/过期</Tag>
+          )
+      },
+      {
+        title: "到期时间",
+        dataIndex: "expireAt",
+        key: "expireAt",
+        render: (value: number) => formatUnixSeconds(value)
+      },
+      {
+        title: "创建时间",
+        dataIndex: "createdAt",
+        key: "createdAt",
+        render: (value: number) => formatUnixSeconds(value)
+      },
+      {
+        title: "操作",
+        key: "actions",
+        width: 120,
+        render: (_, user) => (
+          <Button type={copiedUserId === user.id ? "default" : "primary"} onClick={() => handleCopyLink(user)}>
+            {copiedUserId === user.id ? "已复制" : "复制链接"}
+          </Button>
+        )
+      }
+    ],
+    [copiedUserId, formatUnixSeconds, handleCopyLink]
+  );
+
   return (
-    <main className="shell">
-      <div className="row">
-        <h1 className="title">用户管理（P2）</h1>
-        <button className="button secondary" onClick={handleLogout} disabled={loggingOut}>
-          {loggingOut ? "退出中..." : "退出登录"}
-        </button>
-      </div>
-      <p className="subtle">已登录账号：{username}</p>
-      {expiresAt > 0 ? (
-        <p className="subtle">会话到期时间（Unix 秒）：{expiresAt}</p>
-      ) : null}
-      <p className="subtle">目标：新增用户、搜索用户、复制专属链接。</p>
+    <main className="shell admin-shell">
+      {messageContextHolder}
 
-      <section className="panel">
-        <h2 className="panel-title">新增用户</h2>
-        <form className="inline-form" onSubmit={handleCreateUser}>
-          <input
-            className="input"
-            type="text"
-            value={newRemarkName}
-            placeholder="例如：微信名-大刘"
-            onChange={(event) => setNewRemarkName(event.target.value)}
-            maxLength={80}
-            required
-          />
-          <button className="button" type="submit" disabled={creatingUser}>
-            {creatingUser ? "创建中..." : "创建并复制链接"}
-          </button>
-        </form>
-      </section>
-
-      <section className="panel">
-        <div className="row row-wrap">
-          <h2 className="panel-title">用户列表</h2>
-          <p className="subtle">{userCountText}</p>
+      <Card className="admin-header-card" bordered={false}>
+        <div className="admin-header-row">
+          <div>
+            <Typography.Title level={3} style={{ margin: 0 }}>
+              用户管理（P2）
+            </Typography.Title>
+            <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+              已登录账号：{username}
+            </Typography.Paragraph>
+            {expiresAt > 0 ? (
+              <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                会话到期时间：{formatUnixSeconds(expiresAt)}
+              </Typography.Paragraph>
+            ) : null}
+          </div>
+          <Space>
+            <Button type="primary" onClick={() => setCreateModalOpen(true)}>
+              新增用户
+            </Button>
+            <Button onClick={handleLogout} loading={loggingOut}>
+              退出登录
+            </Button>
+          </Space>
         </div>
+        {sessionErrorMessage ? <Typography.Text type="danger">{sessionErrorMessage}</Typography.Text> : null}
+      </Card>
 
-        <form className="inline-form" onSubmit={handleSearchSubmit}>
-          <input
-            className="input"
-            type="text"
+      <Card className="admin-table-card" bordered={false}>
+        <div className="admin-toolbar-row">
+          <Input.Search
             value={searchQueryInput}
+            allowClear
             placeholder="按备注名或用户 ID 搜索"
+            enterButton="搜索"
             onChange={(event) => setSearchQueryInput(event.target.value)}
+            onSearch={(value) => {
+              void handleSearch(value);
+            }}
           />
-          <button className="button secondary" type="submit" disabled={loadingUsers}>
-            {loadingUsers ? "搜索中..." : "搜索"}
-          </button>
-        </form>
-
-        <div className="table-wrapper">
-          <table className="table">
-            <thead>
-              <tr>
-                <th>用户 ID</th>
-                <th>备注名</th>
-                <th>到期时间</th>
-                <th>创建时间</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {users.length === 0 ? (
-                <tr>
-                  <td className="table-empty" colSpan={5}>
-                    {loadingUsers ? "加载中..." : "暂无用户"}
-                  </td>
-                </tr>
-              ) : (
-                users.map((user) => (
-                  <tr key={user.id}>
-                    <td className="table-code">{user.id}</td>
-                    <td>{user.remarkName}</td>
-                    <td>{formatUnixSeconds(user.expireAt)}</td>
-                    <td>{formatUnixSeconds(user.createdAt)}</td>
-                    <td>
-                      <button
-                        className="button secondary button-inline"
-                        type="button"
-                        onClick={() => handleCopyLink(user)}
-                      >
-                        {copiedUserId === user.id ? "已复制" : "复制链接"}
-                      </button>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+          <Typography.Text type="secondary">{userCountText}</Typography.Text>
         </div>
-      </section>
 
-      {noticeMessage ? <p className="subtle success-text">{noticeMessage}</p> : null}
-      {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
-      <div className="code">Route: /admin | Link: /status/:token (兼容 ?t=)</div>
+        <Table<AdminUserDTO>
+          rowKey="id"
+          loading={loadingUsers}
+          columns={columns}
+          dataSource={users}
+          pagination={{
+            pageSize: 20,
+            showSizeChanger: false
+          }}
+          scroll={{ x: 980 }}
+        />
+      </Card>
+
+      <Modal
+        title="新增用户"
+        open={createModalOpen}
+        okText="创建并复制链接"
+        cancelText="取消"
+        confirmLoading={submittingCreate}
+        onOk={() => {
+          void handleCreateUserSubmit();
+        }}
+        onCancel={() => {
+          setCreateModalOpen(false);
+          form.resetFields();
+        }}
+      >
+        <Form<CreateUserFormValues> layout="vertical" form={form}>
+          <Form.Item
+            label="用户备注名"
+            name="remarkName"
+            rules={[
+              {
+                required: true,
+                message: "请输入用户备注名"
+              },
+              {
+                max: 80,
+                message: "最多 80 个字符"
+              }
+            ]}
+          >
+            <Input placeholder="例如：微信名-大刘" />
+          </Form.Item>
+        </Form>
+      </Modal>
     </main>
   );
 };
