@@ -49,12 +49,14 @@ interface CreateUserFormValues {
 interface RechargeFormValues {
   days: number;
   reason: RechargeReason;
+  paymentAmount: number;
   internalNote?: string;
 }
 
 interface BackfillFormValues {
   days: number;
   reason: RechargeReason;
+  paymentAmount: number;
   occurredAtInput: string;
   internalNote?: string;
 }
@@ -264,6 +266,10 @@ export const AdminShellPage = () => {
     return RECHARGE_SOURCE_LABELS[source] || source;
   }, []);
 
+  const formatPaymentAmount = useCallback((amount: number) => {
+    return `¥${amount.toFixed(2)}`;
+  }, []);
+
   const formatProfileChangeField = useCallback((field: UserProfileChangeField) => {
     return PROFILE_FIELD_LABELS[field] || field;
   }, []);
@@ -457,6 +463,7 @@ export const AdminShellPage = () => {
     rechargeForm.setFieldsValue({
       days: 30,
       reason: RechargeReason.WECHAT_PAY,
+      paymentAmount: 0,
       internalNote: ""
     });
   };
@@ -467,6 +474,7 @@ export const AdminShellPage = () => {
     backfillForm.setFieldsValue({
       days: 30,
       reason: RechargeReason.WECHAT_PAY,
+      paymentAmount: 0,
       occurredAtInput: toLocalDateTimeInput(Math.floor(Date.now() / 1000)),
       internalNote: ""
     });
@@ -509,6 +517,7 @@ export const AdminShellPage = () => {
           body: JSON.stringify({
             days: values.days,
             reason: values.reason,
+            paymentAmount: values.paymentAmount,
             internalNote: values.internalNote?.trim() || undefined
           })
         }
@@ -550,6 +559,7 @@ export const AdminShellPage = () => {
           body: JSON.stringify({
             days: values.days,
             reason: values.reason,
+            paymentAmount: values.paymentAmount,
             occurredAt,
             internalNote: values.internalNote?.trim() || undefined
           })
@@ -728,6 +738,13 @@ export const AdminShellPage = () => {
         render: (value: number) => <Typography.Text type="success">+{value}</Typography.Text>
       },
       {
+        title: "支付金额",
+        dataIndex: "paymentAmount",
+        key: "paymentAmount",
+        width: 120,
+        render: (value: number) => formatPaymentAmount(value)
+      },
+      {
         title: "充值前到期",
         dataIndex: "expireBefore",
         key: "expireBefore",
@@ -763,7 +780,7 @@ export const AdminShellPage = () => {
         width: 140
       }
     ],
-    [formatRechargeReason, formatRechargeSource, formatUnixSeconds]
+    [formatPaymentAmount, formatRechargeReason, formatRechargeSource, formatUnixSeconds]
   );
 
   const profileChangeLogColumns = useMemo<ColumnsType<AdminUserProfileChangeRecordDTO>>(
@@ -1219,6 +1236,24 @@ export const AdminShellPage = () => {
                 placeholder="请选择充值原因"
               />
             </Form.Item>
+            <Form.Item
+              label="支付金额（元）"
+              name="paymentAmount"
+              rules={[
+                {
+                  required: true,
+                  message: "请输入支付金额"
+                }
+              ]}
+            >
+              <InputNumber
+                min={0}
+                precision={2}
+                step={0.01}
+                style={{ width: "100%" }}
+                placeholder="例如：99.00"
+              />
+            </Form.Item>
             <Form.Item label="内部备注" name="internalNote">
               <Input.TextArea
                 maxLength={MAX_INTERNAL_NOTE_LENGTH}
@@ -1298,6 +1333,24 @@ export const AdminShellPage = () => {
                   label
                 }))}
                 placeholder="请选择补录原因"
+              />
+            </Form.Item>
+            <Form.Item
+              label="支付金额（元）"
+              name="paymentAmount"
+              rules={[
+                {
+                  required: true,
+                  message: "请输入支付金额"
+                }
+              ]}
+            >
+              <InputNumber
+                min={0}
+                precision={2}
+                step={0.01}
+                style={{ width: "100%" }}
+                placeholder="例如：99.00"
               />
             </Form.Item>
             <Form.Item label="内部备注" name="internalNote">

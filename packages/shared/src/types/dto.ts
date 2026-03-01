@@ -94,6 +94,7 @@ export interface AdminListUserProfileChangeLogsResponseDTO {
 export interface AdminRechargeUserRequestDTO {
   days: number;
   reason: RechargeReason;
+  paymentAmount: number;
   internalNote?: string;
 }
 
@@ -103,6 +104,7 @@ export interface AdminRechargeRecordDTO {
   username: string;
   changeDays: number;
   reason: RechargeReason;
+  paymentAmount: number;
   internalNote: string | null;
   expireBefore: number;
   expireAfter: number;
@@ -124,6 +126,7 @@ export interface AdminRechargeUserResponseDTO {
 export interface AdminBackfillRechargeRequestDTO {
   days: number;
   reason: RechargeReason;
+  paymentAmount: number;
   occurredAt: number;
   internalNote?: string;
 }

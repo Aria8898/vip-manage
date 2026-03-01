@@ -72,6 +72,7 @@ const MAX_EMAIL_LENGTH = 120;
 const MAX_INTERNAL_NOTE_LENGTH = 200;
 const MAX_PROFILE_CHANGE_NOTE_LENGTH = 200;
 const MAX_RECHARGE_DAYS = 3650;
+const MAX_PAYMENT_AMOUNT = 1000000;
 const SECONDS_PER_DAY = 24 * 60 * 60;
 const UTC8_OFFSET_SECONDS = 8 * 60 * 60;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
@@ -112,6 +113,7 @@ interface RechargeRecordRow {
   username: string;
   change_days: number;
   reason: string;
+  payment_amount_cents: number | null;
   internal_note: string | null;
   expire_before: number;
   expire_after: number;
@@ -354,7 +356,8 @@ const hasRechargeTimelineColumns = async (db: D1Database): Promise<boolean> => {
   const hasColumns =
     columnNames.has("occurred_at") &&
     columnNames.has("recorded_at") &&
-    columnNames.has("source");
+    columnNames.has("source") &&
+    columnNames.has("payment_amount_cents");
   cachedHasRechargeTimelineColumns = hasColumns;
 
   return hasColumns;
@@ -397,6 +400,21 @@ const normalizeProfileChangeNote = (value: unknown): string | null => {
   }
 
   return trimmed;
+};
+
+const normalizePaymentAmount = (value: unknown): number | null => {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+
+  return Number(value.toFixed(2));
+};
+
+const toPaymentAmountCents = (value: number): number => Math.round(value * 100);
+
+const toPaymentAmount = (value: number | null | undefined): number => {
+  const cents = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  return Number((Math.max(cents, 0) / 100).toFixed(2));
 };
 
 const isUserProfileChangeField = (value: string): value is UserProfileChangeField => {
@@ -446,6 +464,7 @@ const toAdminRechargeRecordDTO = (row: RechargeRecordRow): AdminRechargeRecordDT
   username: row.username,
   changeDays: row.change_days,
   reason: toRechargeReason(row.reason),
+  paymentAmount: toPaymentAmount(row.payment_amount_cents),
   internalNote: row.internal_note,
   expireBefore: row.expire_before,
   expireAfter: row.expire_after,
@@ -505,7 +524,7 @@ const requireRechargeTimelineColumns = async (
   if (!hasColumns) {
     return {
       ok: false,
-      response: fail(c, 500, "database migration required: recharge timeline columns missing")
+      response: fail(c, 500, "database migration required: recharge record columns missing")
     };
   }
 
@@ -563,6 +582,7 @@ const createAndRebuildRechargeRecord = async (
     userId: string;
     days: number;
     reason: RechargeReason;
+    paymentAmountCents: number;
     internalNote: string | null;
     occurredAt: number;
     source: RechargeRecordSource;
@@ -587,6 +607,7 @@ const createAndRebuildRechargeRecord = async (
       user_id,
       change_days,
       reason,
+      payment_amount_cents,
       internal_note,
       expire_before,
       expire_after,
@@ -595,13 +616,14 @@ const createAndRebuildRechargeRecord = async (
       occurred_at,
       recorded_at,
       source
-    ) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)`
+    ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)`
   )
     .bind(
       recordId,
       params.userId,
       params.days,
       params.reason,
+      params.paymentAmountCents,
       params.internalNote,
       session.adminId,
       now,
@@ -619,6 +641,7 @@ const createAndRebuildRechargeRecord = async (
       u.username AS username,
       r.change_days,
       r.reason,
+      r.payment_amount_cents,
       r.internal_note,
       r.expire_before,
       r.expire_after,
@@ -1238,6 +1261,7 @@ app.post("/api/admin/users/:id/recharge", async (c) => {
   const body = await c.req.json<Partial<AdminRechargeUserRequestDTO>>().catch(() => null);
   const days = Number(body?.days);
   const reasonRaw = typeof body?.reason === "string" ? body.reason : "";
+  const paymentAmount = normalizePaymentAmount(body?.paymentAmount);
   const internalNote = normalizeInternalNote(body?.internalNote);
 
   if (!Number.isInteger(days) || days <= 0 || days > MAX_RECHARGE_DAYS) {
@@ -1245,6 +1269,9 @@ app.post("/api/admin/users/:id/recharge", async (c) => {
   }
   if (!isRechargeReason(reasonRaw)) {
     return fail(c, 400, "invalid recharge reason");
+  }
+  if (paymentAmount === null || paymentAmount < 0 || paymentAmount > MAX_PAYMENT_AMOUNT) {
+    return fail(c, 400, `paymentAmount must be between 0 and ${MAX_PAYMENT_AMOUNT}`);
   }
   if (internalNote && internalNote.length > MAX_INTERNAL_NOTE_LENGTH) {
     return fail(c, 400, `internalNote must be <= ${MAX_INTERNAL_NOTE_LENGTH} chars`);
@@ -1256,6 +1283,7 @@ app.post("/api/admin/users/:id/recharge", async (c) => {
       userId,
       days,
       reason: reasonRaw,
+      paymentAmountCents: toPaymentAmountCents(paymentAmount),
       internalNote,
       occurredAt: now,
       source: RechargeRecordSource.NORMAL
@@ -1285,6 +1313,7 @@ app.post("/api/admin/users/:id/recharge/backfill", async (c) => {
   const body = await c.req.json<Partial<AdminBackfillRechargeRequestDTO>>().catch(() => null);
   const days = Number(body?.days);
   const reasonRaw = typeof body?.reason === "string" ? body.reason : "";
+  const paymentAmount = normalizePaymentAmount(body?.paymentAmount);
   const occurredAt = Number(body?.occurredAt);
   const internalNote = normalizeInternalNote(body?.internalNote);
   const now = getCurrentTimestamp();
@@ -1294,6 +1323,9 @@ app.post("/api/admin/users/:id/recharge/backfill", async (c) => {
   }
   if (!isRechargeReason(reasonRaw)) {
     return fail(c, 400, "invalid recharge reason");
+  }
+  if (paymentAmount === null || paymentAmount < 0 || paymentAmount > MAX_PAYMENT_AMOUNT) {
+    return fail(c, 400, `paymentAmount must be between 0 and ${MAX_PAYMENT_AMOUNT}`);
   }
   if (!Number.isInteger(occurredAt) || occurredAt <= 0) {
     return fail(c, 400, "occurredAt must be a positive unix timestamp");
@@ -1310,6 +1342,7 @@ app.post("/api/admin/users/:id/recharge/backfill", async (c) => {
       userId,
       days,
       reason: reasonRaw,
+      paymentAmountCents: toPaymentAmountCents(paymentAmount),
       internalNote,
       occurredAt,
       source: RechargeRecordSource.BACKFILL
@@ -1462,6 +1495,7 @@ app.get("/api/admin/recharge-records", async (c) => {
         u.username AS username,
         r.change_days,
         r.reason,
+        r.payment_amount_cents,
         r.internal_note,
         r.expire_before,
         r.expire_after,
@@ -1486,6 +1520,7 @@ app.get("/api/admin/recharge-records", async (c) => {
         u.username AS username,
         r.change_days,
         r.reason,
+        0 AS payment_amount_cents,
         r.internal_note,
         r.expire_before,
         r.expire_after,
