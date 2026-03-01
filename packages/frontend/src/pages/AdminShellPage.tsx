@@ -355,7 +355,7 @@ export const AdminShellPage = () => {
 
   const buildStatusLink = useCallback((statusToken: string) => {
     const encodedToken = encodeURIComponent(statusToken);
-    return `${window.location.origin}/status/${encodedToken}?t=${encodedToken}`;
+    return `${window.location.origin}/status/${encodedToken}`;
   }, []);
 
   const formatRechargeReason = useCallback((reason: RechargeReason) => {

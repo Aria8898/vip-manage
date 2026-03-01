@@ -77,6 +77,8 @@ const MAX_PAYMENT_AMOUNT = 1000000;
 const SECONDS_PER_DAY = 24 * 60 * 60;
 const UTC8_OFFSET_SECONDS = 8 * 60 * 60;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
+const COMPACT_USER_TOKEN_MARKER = 2;
+const COMPACT_USER_TOKEN_SIGNATURE_BYTES = 16;
 type HttpStatus = 200 | 400 | 401 | 404 | 429 | 500;
 
 interface AdminUserRow {
@@ -95,6 +97,7 @@ interface UserRow {
   created_at: number;
   updated_at: number;
   token_version?: number;
+  access_token_hash?: string;
 }
 
 interface SqliteTableInfoRow {
@@ -267,6 +270,29 @@ const encodeUtf8Base64Url = (input: string): string => {
   return toBase64Url(encoded);
 };
 
+const parseUuidToBytes = (uuid: string): Uint8Array | null => {
+  const normalized = uuid.trim().toLowerCase().replaceAll("-", "");
+  if (!/^[0-9a-f]{32}$/u.test(normalized)) {
+    return null;
+  }
+
+  const bytes = new Uint8Array(16);
+  for (let index = 0; index < bytes.length; index += 1) {
+    const offset = index * 2;
+    bytes[index] = Number.parseInt(normalized.slice(offset, offset + 2), 16);
+  }
+
+  return bytes;
+};
+
+const toUint32Bytes = (value: number): Uint8Array => {
+  const normalized = Math.max(0, Math.floor(value));
+  const bytes = new Uint8Array(4);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, normalized, false);
+  return bytes;
+};
+
 const hmacSha256 = async (secret: string, data: string): Promise<Uint8Array> => {
   const key = await crypto.subtle.importKey(
     "raw",
@@ -293,7 +319,7 @@ const sha256Hex = async (input: string): Promise<string> => {
   return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
 };
 
-const buildUserStatusToken = async (
+const buildLegacyUserStatusToken = async (
   userId: string,
   tokenVersion: number,
   secret: string
@@ -306,12 +332,76 @@ const buildUserStatusToken = async (
   return `${payloadBase64}.${signatureBase64}`;
 };
 
+const buildCompactUserStatusToken = async (
+  userId: string,
+  tokenVersion: number,
+  secret: string
+): Promise<string | null> => {
+  const userIdBytes = parseUuidToBytes(userId);
+  if (!userIdBytes) {
+    return null;
+  }
+
+  const payloadBytes = new Uint8Array(1 + userIdBytes.length + 4);
+  payloadBytes[0] = COMPACT_USER_TOKEN_MARKER;
+  payloadBytes.set(userIdBytes, 1);
+  payloadBytes.set(toUint32Bytes(tokenVersion), 1 + userIdBytes.length);
+  const payloadBase64 = toBase64Url(payloadBytes);
+  const signature = await hmacSha256(secret, payloadBase64);
+  const signatureBase64 = toBase64Url(
+    signature.slice(0, COMPACT_USER_TOKEN_SIGNATURE_BYTES)
+  );
+
+  return `${payloadBase64}.${signatureBase64}`;
+};
+
+const buildUserStatusToken = async (
+  userId: string,
+  tokenVersion: number,
+  secret: string
+): Promise<string> => {
+  const compactToken = await buildCompactUserStatusToken(userId, tokenVersion, secret);
+  if (compactToken) {
+    return compactToken;
+  }
+  return buildLegacyUserStatusToken(userId, tokenVersion, secret);
+};
+
+const resolveUserStatusToken = async (
+  row: UserRow,
+  tokenVersion: number,
+  tokenSecret: string
+): Promise<string> => {
+  const compactToken = await buildCompactUserStatusToken(row.id, tokenVersion, tokenSecret);
+  const preferredToken =
+    compactToken ?? (await buildLegacyUserStatusToken(row.id, tokenVersion, tokenSecret));
+  const tokenHash = row.access_token_hash?.trim();
+  if (!tokenHash) {
+    return preferredToken;
+  }
+
+  const preferredHash = await sha256Hex(preferredToken);
+  if (preferredHash === tokenHash) {
+    return preferredToken;
+  }
+
+  if (compactToken) {
+    const legacyToken = await buildLegacyUserStatusToken(row.id, tokenVersion, tokenSecret);
+    const legacyHash = await sha256Hex(legacyToken);
+    if (legacyHash === tokenHash) {
+      return legacyToken;
+    }
+  }
+
+  return preferredToken;
+};
+
 const toAdminUserDTO = async (
   row: UserRow,
   tokenSecret: string
 ): Promise<AdminUserDTO> => {
   const tokenVersion = row.token_version ?? DEFAULT_USER_TOKEN_VERSION;
-  const statusToken = await buildUserStatusToken(row.id, tokenVersion, tokenSecret);
+  const statusToken = await resolveUserStatusToken(row, tokenVersion, tokenSecret);
 
   return {
     id: row.id,
@@ -1093,7 +1183,7 @@ app.get("/api/admin/users", async (c) => {
 
   const rows = query
     ? await c.env.DB.prepare(
-      `SELECT id, username, ${profileSelect}, expire_at, created_at, updated_at, ${tokenVersionSelect}
+      `SELECT id, username, ${profileSelect}, expire_at, created_at, updated_at, ${tokenVersionSelect}, access_token_hash
        FROM users
        WHERE username LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\'
        ORDER BY created_at DESC
@@ -1102,7 +1192,7 @@ app.get("/api/admin/users", async (c) => {
       .bind(`%${escapedQuery}%`, `%${escapedQuery}%`, USER_LIST_LIMIT)
       .all<UserRow>()
     : await c.env.DB.prepare(
-      `SELECT id, username, ${profileSelect}, expire_at, created_at, updated_at, ${tokenVersionSelect}
+      `SELECT id, username, ${profileSelect}, expire_at, created_at, updated_at, ${tokenVersionSelect}, access_token_hash
        FROM users
        ORDER BY created_at DESC
        LIMIT ?`
@@ -1201,7 +1291,8 @@ app.patch("/api/admin/users/:id", async (c) => {
       expire_at,
       created_at,
       updated_at,
-      ${tokenVersionSelect}
+      ${tokenVersionSelect},
+      access_token_hash
     FROM users
     WHERE id = ?
     LIMIT 1`
