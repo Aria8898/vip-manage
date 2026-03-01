@@ -1,0 +1,12 @@
+name = "vip-membership-backend"
+main = "src/index.ts"
+compatibility_date = "2025-11-01"
+
+[vars]
+APP_ENV = "development"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "vip-membership-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "migrations"

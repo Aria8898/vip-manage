@@ -1,0 +1,19 @@
+{
+  "name": "vip-membership-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.8.1",
+  "scripts": {
+    "dev": "concurrently -n backend,frontend -c cyan,green \"pnpm --filter @vip/backend dev\" \"pnpm --filter @vip/frontend dev\"",
+    "dev:backend": "pnpm --filter @vip/backend dev",
+    "dev:frontend": "pnpm --filter @vip/frontend dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "db:migrate:local": "pnpm --filter @vip/backend db:migrate:local",
+    "db:migrate:remote": "pnpm --filter @vip/backend db:migrate:remote"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.8.2"
+  }
+}

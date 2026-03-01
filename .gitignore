@@ -1,0 +1,17 @@
+node_modules
+.pnpm-store
+.DS_Store
+
+# Build outputs
+dist
+coverage
+
+# Tooling
+.wrangler
+*.tsbuildinfo
+
+# Env files
+.env
+.env.*
+!.env.example
+!.dev.vars.example

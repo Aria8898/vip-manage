@@ -1,0 +1,23 @@
+{
+  "name": "@vip/backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev src/index.ts --local --port 8787",
+    "deploy": "wrangler deploy",
+    "build": "wrangler deploy --dry-run",
+    "typecheck": "tsc -p tsconfig.json",
+    "db:migrate:local": "wrangler d1 migrations apply VIP_DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply VIP_DB --remote"
+  },
+  "dependencies": {
+    "@vip/shared": "workspace:*",
+    "hono": "^4.7.2"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260211.0",
+    "typescript": "^5.8.2",
+    "wrangler": "^4.5.0"
+  }
+}
