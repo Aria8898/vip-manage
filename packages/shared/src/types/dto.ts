@@ -1,3 +1,5 @@
+import type { RechargeReason } from "../enums/common";
+
 export interface HealthDTO {
   status: "ok";
   timestamp: number;
@@ -45,4 +47,43 @@ export interface AdminCreateUserResponseDTO {
 export interface AdminListUsersResponseDTO {
   items: AdminUserDTO[];
   query: string;
+}
+
+export interface AdminRechargeUserRequestDTO {
+  days: number;
+  reason: RechargeReason;
+  internalNote?: string;
+}
+
+export interface AdminRechargeRecordDTO {
+  id: string;
+  userId: string;
+  userRemarkName: string;
+  changeDays: number;
+  reason: RechargeReason;
+  internalNote: string | null;
+  expireBefore: number;
+  expireAfter: number;
+  operatorAdminId: string;
+  operatorAdminUsername: string;
+  createdAt: number;
+}
+
+export interface AdminRechargeUserResponseDTO {
+  user: UserSummaryDTO & {
+    updatedAt: number;
+  };
+  record: AdminRechargeRecordDTO;
+}
+
+export interface AdminListRechargeRecordsResponseDTO {
+  items: AdminRechargeRecordDTO[];
+  limit: number;
+}
+
+export interface AdminDashboardTodayDTO {
+  dayStartAt: number;
+  dayEndAt: number;
+  rechargeCount: number;
+  totalChangeDays: number;
 }

@@ -1,16 +1,26 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type {
-  AdminCreateUserResponseDTO,
-  AdminListUsersResponseDTO,
-  AdminUserDTO
+import {
+  RechargeReason,
+  type AdminCreateUserResponseDTO,
+  type AdminDashboardTodayDTO,
+  type AdminListRechargeRecordsResponseDTO,
+  type AdminListUsersResponseDTO,
+  type AdminRechargeRecordDTO,
+  type AdminRechargeUserResponseDTO,
+  type AdminUserDTO
 } from "@vip/shared";
 import {
   Button,
   Card,
+  Col,
   Form,
   Input,
+  InputNumber,
   Modal,
+  Row,
+  Select,
   Space,
+  Statistic,
   Table,
   Tag,
   Typography,
@@ -26,9 +36,26 @@ interface CreateUserFormValues {
   remarkName: string;
 }
 
+interface RechargeFormValues {
+  days: number;
+  reason: RechargeReason;
+  internalNote?: string;
+}
+
+const RECHARGE_REASON_LABELS: Record<RechargeReason, string> = {
+  [RechargeReason.WECHAT_PAY]: "微信支付",
+  [RechargeReason.ALIPAY]: "支付宝支付",
+  [RechargeReason.CAMPAIGN_GIFT]: "活动赠送",
+  [RechargeReason.AFTER_SALES]: "售后补偿",
+  [RechargeReason.MANUAL_FIX]: "手动修正"
+};
+
+const MAX_INTERNAL_NOTE_LENGTH = 200;
+
 export const AdminShellPage = () => {
   const navigate = useNavigate();
-  const [form] = Form.useForm<CreateUserFormValues>();
+  const [createUserForm] = Form.useForm<CreateUserFormValues>();
+  const [rechargeForm] = Form.useForm<RechargeFormValues>();
   const [messageApi, messageContextHolder] = message.useMessage();
   const [username, setUsername] = useState<string>("-");
   const [expiresAt, setExpiresAt] = useState<number>(0);
@@ -41,6 +68,13 @@ export const AdminShellPage = () => {
   const [submittingCreate, setSubmittingCreate] = useState(false);
   const [copiedUserId, setCopiedUserId] = useState("");
   const [sessionErrorMessage, setSessionErrorMessage] = useState("");
+  const [dashboard, setDashboard] = useState<AdminDashboardTodayDTO | null>(null);
+  const [loadingDashboard, setLoadingDashboard] = useState(false);
+  const [rechargeRecords, setRechargeRecords] = useState<AdminRechargeRecordDTO[]>([]);
+  const [loadingRechargeRecords, setLoadingRechargeRecords] = useState(false);
+  const [rechargeModalOpen, setRechargeModalOpen] = useState(false);
+  const [submittingRecharge, setSubmittingRecharge] = useState(false);
+  const [rechargeTargetUser, setRechargeTargetUser] = useState<AdminUserDTO | null>(null);
 
   const loadUsers = useCallback(async (query: string) => {
     setLoadingUsers(true);
@@ -56,6 +90,39 @@ export const AdminShellPage = () => {
       messageApi.error(error instanceof Error ? error.message : "加载用户列表失败");
     } finally {
       setLoadingUsers(false);
+    }
+  }, [messageApi]);
+
+  const loadDashboard = useCallback(async () => {
+    setLoadingDashboard(true);
+
+    try {
+      const response = await apiRequest<AdminDashboardTodayDTO>("/admin/dashboard/today", {
+        method: "GET"
+      });
+      setDashboard(response.data);
+    } catch (error) {
+      messageApi.error(error instanceof Error ? error.message : "加载今日概览失败");
+    } finally {
+      setLoadingDashboard(false);
+    }
+  }, [messageApi]);
+
+  const loadRechargeRecords = useCallback(async () => {
+    setLoadingRechargeRecords(true);
+
+    try {
+      const response = await apiRequest<AdminListRechargeRecordsResponseDTO>("/admin/recharge-records", {
+        method: "GET",
+        query: {
+          limit: 100
+        }
+      });
+      setRechargeRecords(response.data.items);
+    } catch (error) {
+      messageApi.error(error instanceof Error ? error.message : "加载充值流水失败");
+    } finally {
+      setLoadingRechargeRecords(false);
     }
   }, [messageApi]);
 
@@ -78,11 +145,13 @@ export const AdminShellPage = () => {
 
     void loadSession();
     void loadUsers("");
+    void loadDashboard();
+    void loadRechargeRecords();
 
     return () => {
       cancelled = true;
     };
-  }, [loadUsers]);
+  }, [loadDashboard, loadRechargeRecords, loadUsers]);
 
   const handleLogout = async () => {
     setLoggingOut(true);
@@ -115,15 +184,25 @@ export const AdminShellPage = () => {
     return `${window.location.origin}/status/${encodedToken}?t=${encodedToken}`;
   }, []);
 
+  const formatRechargeReason = useCallback((reason: RechargeReason) => {
+    return RECHARGE_REASON_LABELS[reason] || reason;
+  }, []);
+
   const handleSearch = async (query: string) => {
     const normalized = query.trim();
     setSearchQueryInput(normalized);
     await loadUsers(normalized);
   };
 
+  const closeRechargeModal = useCallback(() => {
+    setRechargeModalOpen(false);
+    setRechargeTargetUser(null);
+    rechargeForm.resetFields();
+  }, [rechargeForm]);
+
   const handleCreateUserSubmit = async () => {
     try {
-      const values = await form.validateFields();
+      const values = await createUserForm.validateFields();
       const remarkName = values.remarkName.trim();
       if (!remarkName) {
         return;
@@ -138,7 +217,7 @@ export const AdminShellPage = () => {
       });
 
       const createdUser = response.data.user;
-      form.resetFields();
+      createUserForm.resetFields();
       setCreateModalOpen(false);
       setSearchQueryInput("");
       await loadUsers("");
@@ -148,7 +227,7 @@ export const AdminShellPage = () => {
       setCopiedUserId(createdUser.id);
       messageApi.success(`已创建并复制链接：${createdUser.remarkName}`);
     } catch (error) {
-      if (error instanceof Error && "errorFields" in error) {
+      if (typeof error === "object" && error !== null && "errorFields" in error) {
         return;
       }
       messageApi.error(error instanceof Error ? error.message : "创建用户失败");
@@ -169,12 +248,67 @@ export const AdminShellPage = () => {
     }
   };
 
+  const handleOpenRechargeModal = (user: AdminUserDTO) => {
+    setRechargeTargetUser(user);
+    setRechargeModalOpen(true);
+    rechargeForm.setFieldsValue({
+      days: 30,
+      reason: RechargeReason.WECHAT_PAY,
+      internalNote: ""
+    });
+  };
+
+  const handleRechargeSubmit = async () => {
+    if (!rechargeTargetUser) {
+      return;
+    }
+
+    try {
+      const values = await rechargeForm.validateFields();
+      setSubmittingRecharge(true);
+      const response = await apiRequest<AdminRechargeUserResponseDTO>(
+        `/admin/users/${encodeURIComponent(rechargeTargetUser.id)}/recharge`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            days: values.days,
+            reason: values.reason,
+            internalNote: values.internalNote?.trim() || undefined
+          })
+        }
+      );
+
+      closeRechargeModal();
+      await Promise.all([loadUsers(activeQuery), loadDashboard(), loadRechargeRecords()]);
+      messageApi.success(
+        `充值成功：${response.data.user.remarkName}，当前到期 ${formatUnixSeconds(response.data.user.expireAt)}`
+      );
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "errorFields" in error) {
+        return;
+      }
+      messageApi.error(error instanceof Error ? error.message : "充值失败");
+    } finally {
+      setSubmittingRecharge(false);
+    }
+  };
+
   const userCountText = useMemo(() => {
     const prefix = activeQuery ? `搜索 “${activeQuery}”` : "全部用户";
     return `${prefix}：${users.length} 条`;
   }, [activeQuery, users.length]);
 
-  const columns = useMemo<ColumnsType<AdminUserDTO>>(
+  const dashboardRangeText = useMemo(() => {
+    if (!dashboard) {
+      return "统计范围（UTC+8）：-";
+    }
+
+    return `统计范围（UTC+8）：${formatUnixSeconds(dashboard.dayStartAt)} - ${formatUnixSeconds(
+      dashboard.dayEndAt - 1
+    )}`;
+  }, [dashboard, formatUnixSeconds]);
+
+  const userColumns = useMemo<ColumnsType<AdminUserDTO>>(
     () => [
       {
         title: "用户 ID",
@@ -215,15 +349,87 @@ export const AdminShellPage = () => {
       {
         title: "操作",
         key: "actions",
-        width: 120,
+        width: 200,
         render: (_, user) => (
-          <Button type={copiedUserId === user.id ? "default" : "primary"} onClick={() => handleCopyLink(user)}>
-            {copiedUserId === user.id ? "已复制" : "复制链接"}
-          </Button>
+          <Space size="small" wrap>
+            <Button type={copiedUserId === user.id ? "default" : "primary"} onClick={() => handleCopyLink(user)}>
+              {copiedUserId === user.id ? "已复制" : "复制链接"}
+            </Button>
+            <Button onClick={() => handleOpenRechargeModal(user)}>充值</Button>
+          </Space>
         )
       }
     ],
     [copiedUserId, formatUnixSeconds, handleCopyLink]
+  );
+
+  const rechargeRecordColumns = useMemo<ColumnsType<AdminRechargeRecordDTO>>(
+    () => [
+      {
+        title: "时间",
+        dataIndex: "createdAt",
+        key: "createdAt",
+        width: 180,
+        render: (value: number) => formatUnixSeconds(value)
+      },
+      {
+        title: "用户",
+        dataIndex: "userRemarkName",
+        key: "userRemarkName",
+        width: 220,
+        render: (_, record) => (
+          <Space direction="vertical" size={0}>
+            <Typography.Text>{record.userRemarkName}</Typography.Text>
+            <Typography.Text type="secondary" code>
+              {record.userId}
+            </Typography.Text>
+          </Space>
+        )
+      },
+      {
+        title: "变动天数",
+        dataIndex: "changeDays",
+        key: "changeDays",
+        width: 100,
+        render: (value: number) => <Typography.Text type="success">+{value}</Typography.Text>
+      },
+      {
+        title: "充值前到期",
+        dataIndex: "expireBefore",
+        key: "expireBefore",
+        width: 180,
+        render: (value: number) => formatUnixSeconds(value)
+      },
+      {
+        title: "充值后到期",
+        dataIndex: "expireAfter",
+        key: "expireAfter",
+        width: 180,
+        render: (value: number) => formatUnixSeconds(value)
+      },
+      {
+        title: "原因",
+        dataIndex: "reason",
+        key: "reason",
+        width: 140,
+        render: (value: RechargeReason) => formatRechargeReason(value)
+      },
+      {
+        title: "内部备注",
+        dataIndex: "internalNote",
+        key: "internalNote",
+        width: 220,
+        ellipsis: true,
+        render: (value: string | null) => value || "-"
+      },
+      {
+        title: "操作管理员",
+        dataIndex: "operatorAdminUsername",
+        key: "operatorAdminUsername",
+        width: 140
+      }
+    ],
+    [formatRechargeReason, formatUnixSeconds]
   );
 
   return (
@@ -234,7 +440,7 @@ export const AdminShellPage = () => {
         <div className="admin-header-row">
           <div>
             <Typography.Title level={3} style={{ margin: 0 }}>
-              用户管理（P2）
+              用户管理（P3 充值与审计）
             </Typography.Title>
             <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
               已登录账号：{username}
@@ -257,6 +463,23 @@ export const AdminShellPage = () => {
         {sessionErrorMessage ? <Typography.Text type="danger">{sessionErrorMessage}</Typography.Text> : null}
       </Card>
 
+      <Card className="admin-overview-card" bordered={false}>
+        <Typography.Title level={5} style={{ marginTop: 0 }}>
+          今日概览
+        </Typography.Title>
+        <Row gutter={[16, 16]}>
+          <Col xs={24} sm={12}>
+            <Statistic title="今日充值次数" value={dashboard?.rechargeCount || 0} loading={loadingDashboard} />
+          </Col>
+          <Col xs={24} sm={12}>
+            <Statistic title="今日送出总天数" value={dashboard?.totalChangeDays || 0} loading={loadingDashboard} suffix="天" />
+          </Col>
+        </Row>
+        <Typography.Paragraph type="secondary" style={{ marginBottom: 0, marginTop: 12 }}>
+          {dashboardRangeText}
+        </Typography.Paragraph>
+      </Card>
+
       <Card className="admin-table-card" bordered={false}>
         <div className="admin-toolbar-row">
           <Input.Search
@@ -275,13 +498,36 @@ export const AdminShellPage = () => {
         <Table<AdminUserDTO>
           rowKey="id"
           loading={loadingUsers}
-          columns={columns}
+          columns={userColumns}
           dataSource={users}
           pagination={{
             pageSize: 20,
             showSizeChanger: false
           }}
-          scroll={{ x: 980 }}
+          scroll={{ x: 1200 }}
+        />
+      </Card>
+
+      <Card className="admin-records-card" bordered={false}>
+        <div className="admin-toolbar-row">
+          <Typography.Title level={5} style={{ margin: 0 }}>
+            充值流水（最近 {rechargeRecords.length} 条）
+          </Typography.Title>
+          <Button onClick={() => void loadRechargeRecords()} loading={loadingRechargeRecords}>
+            刷新流水
+          </Button>
+        </div>
+
+        <Table<AdminRechargeRecordDTO>
+          rowKey="id"
+          loading={loadingRechargeRecords}
+          columns={rechargeRecordColumns}
+          dataSource={rechargeRecords}
+          pagination={{
+            pageSize: 10,
+            showSizeChanger: false
+          }}
+          scroll={{ x: 1500 }}
         />
       </Card>
 
@@ -296,10 +542,10 @@ export const AdminShellPage = () => {
         }}
         onCancel={() => {
           setCreateModalOpen(false);
-          form.resetFields();
+          createUserForm.resetFields();
         }}
       >
-        <Form<CreateUserFormValues> layout="vertical" form={form}>
+        <Form<CreateUserFormValues> layout="vertical" form={createUserForm}>
           <Form.Item
             label="用户备注名"
             name="remarkName"
@@ -317,6 +563,71 @@ export const AdminShellPage = () => {
             <Input placeholder="例如：微信名-大刘" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        title="用户充值"
+        open={rechargeModalOpen}
+        okText="确认充值"
+        cancelText="取消"
+        confirmLoading={submittingRecharge}
+        onOk={() => {
+          void handleRechargeSubmit();
+        }}
+        onCancel={closeRechargeModal}
+      >
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          <Card size="small">
+            <Typography.Text>
+              充值用户：{rechargeTargetUser?.remarkName || "-"}（{rechargeTargetUser?.id || "-"}）
+            </Typography.Text>
+            <br />
+            <Typography.Text type="secondary">
+              当前到期：{formatUnixSeconds(rechargeTargetUser?.expireAt || 0)}
+            </Typography.Text>
+          </Card>
+
+          <Form<RechargeFormValues> layout="vertical" form={rechargeForm}>
+            <Form.Item
+              label="充值天数"
+              name="days"
+              rules={[
+                {
+                  required: true,
+                  message: "请输入充值天数"
+                }
+              ]}
+            >
+              <InputNumber min={1} max={3650} precision={0} style={{ width: "100%" }} placeholder="例如：30" />
+            </Form.Item>
+            <Form.Item
+              label="充值原因"
+              name="reason"
+              rules={[
+                {
+                  required: true,
+                  message: "请选择充值原因"
+                }
+              ]}
+            >
+              <Select
+                options={Object.entries(RECHARGE_REASON_LABELS).map(([value, label]) => ({
+                  value,
+                  label
+                }))}
+                placeholder="请选择充值原因"
+              />
+            </Form.Item>
+            <Form.Item label="内部备注" name="internalNote">
+              <Input.TextArea
+                maxLength={MAX_INTERNAL_NOTE_LENGTH}
+                showCount
+                rows={3}
+                placeholder="可选，用于记录转账单号、订单备注等"
+              />
+            </Form.Item>
+          </Form>
+        </Space>
       </Modal>
     </main>
   );

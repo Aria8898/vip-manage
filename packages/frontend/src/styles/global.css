@@ -211,7 +211,9 @@ body {
 }
 
 .admin-header-card,
-.admin-table-card {
+.admin-overview-card,
+.admin-table-card,
+.admin-records-card {
   margin-bottom: 16px;
 }
 

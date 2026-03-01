@@ -1,16 +1,22 @@
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { sign, verify } from "hono/jwt";
-import type {
-  AdminCreateUserRequestDTO,
-  AdminCreateUserResponseDTO,
-  AdminLoginRequestDTO,
-  AdminLoginResponseDTO,
-  AdminListUsersResponseDTO,
-  AdminSessionDTO,
-  AdminUserDTO,
-  ApiResponse,
-  HealthDTO
+import {
+  RechargeReason,
+  type AdminCreateUserRequestDTO,
+  type AdminCreateUserResponseDTO,
+  type AdminDashboardTodayDTO,
+  type AdminListRechargeRecordsResponseDTO,
+  type AdminListUsersResponseDTO,
+  type AdminLoginRequestDTO,
+  type AdminLoginResponseDTO,
+  type AdminRechargeRecordDTO,
+  type AdminRechargeUserRequestDTO,
+  type AdminRechargeUserResponseDTO,
+  type AdminSessionDTO,
+  type AdminUserDTO,
+  type ApiResponse,
+  type HealthDTO
 } from "@vip/shared";
 
 import { createRequestId } from "./lib/request-id";
@@ -43,9 +49,15 @@ type Variables = {
 const ADMIN_SESSION_COOKIE = "vip_admin_session";
 const DEFAULT_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
 const DEFAULT_USER_TOKEN_VERSION = 1;
+const DEFAULT_RECHARGE_RECORD_LIMIT = 100;
+const MAX_RECHARGE_RECORD_LIMIT = 200;
 const USER_LIST_LIMIT = 100;
 const MAX_REMARK_NAME_LENGTH = 80;
-type HttpStatus = 200 | 400 | 401 | 429 | 500;
+const MAX_INTERNAL_NOTE_LENGTH = 200;
+const MAX_RECHARGE_DAYS = 3650;
+const SECONDS_PER_DAY = 24 * 60 * 60;
+const UTC8_OFFSET_SECONDS = 8 * 60 * 60;
+type HttpStatus = 200 | 400 | 401 | 404 | 429 | 500;
 
 interface AdminUserRow {
   id: string;
@@ -64,6 +76,31 @@ interface UserRow {
 
 interface SqliteTableInfoRow {
   name: string;
+}
+
+interface RechargeTargetUserRow {
+  id: string;
+  remark_name: string;
+  expire_at: number;
+}
+
+interface RechargeRecordRow {
+  id: string;
+  user_id: string;
+  user_remark_name: string;
+  change_days: number;
+  reason: string;
+  internal_note: string | null;
+  expire_before: number;
+  expire_after: number;
+  operator_admin_id: string;
+  operator_admin_username: string;
+  created_at: number;
+}
+
+interface DashboardTodayRow {
+  recharge_count: number | string | null;
+  total_change_days: number | string | null;
 }
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -209,6 +246,60 @@ const hasUsersTokenVersionColumn = async (db: D1Database): Promise<boolean> => {
   cachedHasUsersTokenVersionColumn = hasColumn;
 
   return hasColumn;
+};
+
+const normalizeInternalNote = (value: unknown): string | null => {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  return trimmed;
+};
+
+const isRechargeReason = (value: string): value is RechargeReason => {
+  return (
+    value === RechargeReason.WECHAT_PAY ||
+    value === RechargeReason.ALIPAY ||
+    value === RechargeReason.CAMPAIGN_GIFT ||
+    value === RechargeReason.AFTER_SALES ||
+    value === RechargeReason.MANUAL_FIX
+  );
+};
+
+const toRechargeReason = (value: string): RechargeReason =>
+  isRechargeReason(value) ? value : RechargeReason.MANUAL_FIX;
+
+const toAdminRechargeRecordDTO = (row: RechargeRecordRow): AdminRechargeRecordDTO => ({
+  id: row.id,
+  userId: row.user_id,
+  userRemarkName: row.user_remark_name,
+  changeDays: row.change_days,
+  reason: toRechargeReason(row.reason),
+  internalNote: row.internal_note,
+  expireBefore: row.expire_before,
+  expireAfter: row.expire_after,
+  operatorAdminId: row.operator_admin_id,
+  operatorAdminUsername: row.operator_admin_username,
+  createdAt: row.created_at
+});
+
+const toUtc8DayRange = (
+  timestamp: number
+): {
+  dayStartAt: number;
+  dayEndAt: number;
+} => {
+  const shifted = timestamp + UTC8_OFFSET_SECONDS;
+  const dayStartAt = Math.floor(shifted / SECONDS_PER_DAY) * SECONDS_PER_DAY - UTC8_OFFSET_SECONDS;
+  return {
+    dayStartAt,
+    dayEndAt: dayStartAt + SECONDS_PER_DAY
+  };
 };
 
 const buildApiResponse = <T>(
@@ -460,6 +551,174 @@ app.get("/api/admin/users", async (c) => {
   const payload: AdminListUsersResponseDTO = {
     items: users,
     query
+  };
+
+  return ok(c, payload);
+});
+
+app.post("/api/admin/users/:id/recharge", async (c) => {
+  const userId = c.req.param("id")?.trim();
+  if (!userId) {
+    return fail(c, 400, "user id is required");
+  }
+
+  const body = await c.req.json<Partial<AdminRechargeUserRequestDTO>>().catch(() => null);
+  const days = Number(body?.days);
+  const reasonRaw = typeof body?.reason === "string" ? body.reason : "";
+  const internalNote = normalizeInternalNote(body?.internalNote);
+
+  if (!Number.isInteger(days) || days <= 0 || days > MAX_RECHARGE_DAYS) {
+    return fail(c, 400, `days must be an integer between 1 and ${MAX_RECHARGE_DAYS}`);
+  }
+  if (!isRechargeReason(reasonRaw)) {
+    return fail(c, 400, "invalid recharge reason");
+  }
+  if (internalNote && internalNote.length > MAX_INTERNAL_NOTE_LENGTH) {
+    return fail(c, 400, `internalNote must be <= ${MAX_INTERNAL_NOTE_LENGTH} chars`);
+  }
+
+  const session = c.get("adminSession");
+  const now = getCurrentTimestamp();
+  const rechargeSeconds = days * SECONDS_PER_DAY;
+
+  try {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const user = await c.env.DB.prepare(
+        "SELECT id, remark_name, expire_at FROM users WHERE id = ? LIMIT 1"
+      )
+        .bind(userId)
+        .first<RechargeTargetUserRow>();
+
+      if (!user) {
+        return fail(c, 404, "user not found");
+      }
+
+      const expireBefore = user.expire_at;
+      const expireAfter = Math.max(expireBefore, now) + rechargeSeconds;
+      const updateResult = await c.env.DB.prepare(
+        "UPDATE users SET expire_at = ?, updated_at = ? WHERE id = ? AND expire_at = ?"
+      )
+        .bind(expireAfter, now, userId, expireBefore)
+        .run();
+      const updateChanges = Number(updateResult.meta?.changes || 0);
+
+      if (updateChanges === 0) {
+        continue;
+      }
+
+      const recordId = crypto.randomUUID();
+      await c.env.DB.prepare(
+        `INSERT INTO recharge_records (
+          id,
+          user_id,
+          change_days,
+          reason,
+          internal_note,
+          expire_before,
+          expire_after,
+          operator_admin_id,
+          created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+        .bind(
+          recordId,
+          userId,
+          days,
+          reasonRaw,
+          internalNote,
+          expireBefore,
+          expireAfter,
+          session.adminId,
+          now
+        )
+        .run();
+
+      const payload: AdminRechargeUserResponseDTO = {
+        user: {
+          id: user.id,
+          remarkName: user.remark_name,
+          expireAt: expireAfter,
+          updatedAt: now
+        },
+        record: {
+          id: recordId,
+          userId: user.id,
+          userRemarkName: user.remark_name,
+          changeDays: days,
+          reason: reasonRaw,
+          internalNote,
+          expireBefore,
+          expireAfter,
+          operatorAdminId: session.adminId,
+          operatorAdminUsername: session.username,
+          createdAt: now
+        }
+      };
+
+      return ok(c, payload);
+    }
+  } catch (error) {
+    console.error("recharge failed", error);
+    return fail(c, 500, "failed to recharge user");
+  }
+
+  return fail(c, 500, "recharge conflict, please retry");
+});
+
+app.get("/api/admin/recharge-records", async (c) => {
+  const rawLimit = Number(c.req.query("limit"));
+  const limit =
+    Number.isInteger(rawLimit) && rawLimit > 0
+      ? Math.min(rawLimit, MAX_RECHARGE_RECORD_LIMIT)
+      : DEFAULT_RECHARGE_RECORD_LIMIT;
+
+  const rows = await c.env.DB.prepare(
+    `SELECT
+      r.id,
+      r.user_id,
+      u.remark_name AS user_remark_name,
+      r.change_days,
+      r.reason,
+      r.internal_note,
+      r.expire_before,
+      r.expire_after,
+      r.operator_admin_id,
+      a.username AS operator_admin_username,
+      r.created_at
+    FROM recharge_records AS r
+    INNER JOIN users AS u ON u.id = r.user_id
+    INNER JOIN admin_users AS a ON a.id = r.operator_admin_id
+    ORDER BY r.created_at DESC, r.id DESC
+    LIMIT ?`
+  )
+    .bind(limit)
+    .all<RechargeRecordRow>();
+
+  const payload: AdminListRechargeRecordsResponseDTO = {
+    items: (rows.results || []).map((row) => toAdminRechargeRecordDTO(row)),
+    limit
+  };
+
+  return ok(c, payload);
+});
+
+app.get("/api/admin/dashboard/today", async (c) => {
+  const range = toUtc8DayRange(getCurrentTimestamp());
+  const row = await c.env.DB.prepare(
+    `SELECT
+      COUNT(*) AS recharge_count,
+      COALESCE(SUM(change_days), 0) AS total_change_days
+    FROM recharge_records
+    WHERE created_at >= ? AND created_at < ?`
+  )
+    .bind(range.dayStartAt, range.dayEndAt)
+    .first<DashboardTodayRow>();
+
+  const payload: AdminDashboardTodayDTO = {
+    dayStartAt: range.dayStartAt,
+    dayEndAt: range.dayEndAt,
+    rechargeCount: Number(row?.recharge_count || 0),
+    totalChangeDays: Number(row?.total_change_days || 0)
   };
 
   return ok(c, payload);
