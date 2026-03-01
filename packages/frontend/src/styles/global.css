@@ -218,6 +218,14 @@ body {
   margin-top: 16px;
 }
 
+.status-history-summary {
+  align-items: center;
+}
+
+.status-history-reason-tag {
+  margin-inline-end: 0;
+}
+
 .admin-header-card,
 .admin-overview-card,
 .admin-table-card,

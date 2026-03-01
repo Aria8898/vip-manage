@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import {
   MembershipStatus,
   RechargeReason,
@@ -30,6 +30,74 @@ const REASON_LABELS: Record<RechargeReason, string> = {
   [RechargeReason.MANUAL_FIX]: "手动修正",
 };
 
+interface HistoryReasonVisualConfig {
+  timelineColor: string;
+  reasonTagStyle: CSSProperties;
+  changeDaysStyle: CSSProperties;
+}
+
+const DEFAULT_HISTORY_REASON_VISUAL: HistoryReasonVisualConfig = {
+  timelineColor: "green",
+  reasonTagStyle: {
+    marginInlineEnd: 0,
+    borderColor: "#d9d9d9",
+    backgroundColor: "#f5f5f5",
+    color: "rgba(0, 0, 0, 0.72)",
+    fontWeight: 600,
+  },
+  changeDaysStyle: {
+    color: "rgba(0, 0, 0, 0.88)",
+    fontWeight: 600,
+  },
+};
+
+const HISTORY_REASON_VISUAL_CONFIG: Partial<
+  Record<RechargeReason, HistoryReasonVisualConfig>
+> = {
+  [RechargeReason.REFERRAL_REWARD]: {
+    timelineColor: "#f59e0b",
+    reasonTagStyle: {
+      marginInlineEnd: 0,
+      borderColor: "#f59e0b",
+      backgroundColor: "#fef3c7",
+      color: "#92400e",
+      fontWeight: 700,
+    },
+    changeDaysStyle: {
+      color: "#b45309",
+      fontWeight: 700,
+    },
+  },
+  [RechargeReason.CAMPAIGN_GIFT]: {
+    timelineColor: "#06b6d4",
+    reasonTagStyle: {
+      marginInlineEnd: 0,
+      borderColor: "#22d3ee",
+      backgroundColor: "#cffafe",
+      color: "#0e7490",
+      fontWeight: 700,
+    },
+    changeDaysStyle: {
+      color: "#0e7490",
+      fontWeight: 700,
+    },
+  },
+  [RechargeReason.AFTER_SALES]: {
+    timelineColor: "#ec4899",
+    reasonTagStyle: {
+      marginInlineEnd: 0,
+      borderColor: "#f9a8d4",
+      backgroundColor: "#fdf2f8",
+      color: "#be185d",
+      fontWeight: 700,
+    },
+    changeDaysStyle: {
+      color: "#be185d",
+      fontWeight: 700,
+    },
+  },
+};
+
 const formatUnixSeconds = (value: number) => {
   if (value <= 0) {
     return "未设置";
@@ -41,10 +109,13 @@ const formatUnixSeconds = (value: number) => {
   });
 };
 
-const formatHistoryItem = (record: UserStatusHistoryRecordDTO): string => {
-  const reasonText = REASON_LABELS[record.reason] || record.reason;
-  return `${reasonText} | +${record.changeDays} 天`;
-};
+const getHistoryReasonVisual = (
+  reason: RechargeReason,
+): HistoryReasonVisualConfig =>
+  HISTORY_REASON_VISUAL_CONFIG[reason] ?? DEFAULT_HISTORY_REASON_VISUAL;
+
+const formatHistoryChangeDays = (record: UserStatusHistoryRecordDTO): string =>
+  `${record.changeDays >= 0 ? "+" : ""}${record.changeDays} 天`;
 
 export const StatusShellPage = () => {
   const { token } = useParams<{ token: string }>();
@@ -191,26 +262,41 @@ export const StatusShellPage = () => {
           <Skeleton active paragraph={{ rows: 5 }} />
         ) : statusData && statusData.history.length > 0 ? (
           <Timeline
-            items={statusData.history.map((item) => ({
-              color: "green",
-              children: (
-                <Space direction="vertical" size={0}>
-                  <Typography.Text>{formatHistoryItem(item)}</Typography.Text>
-                  {item.externalNote ? (
+            items={statusData.history.map((item) => {
+              const reasonVisual = getHistoryReasonVisual(item.reason);
+              const reasonText = REASON_LABELS[item.reason] || item.reason;
+
+              return {
+                color: reasonVisual.timelineColor,
+                children: (
+                  <Space direction="vertical" size={0}>
+                    <Space wrap size={8} className="status-history-summary">
+                      <Tag
+                        className="status-history-reason-tag"
+                        style={reasonVisual.reasonTagStyle}
+                      >
+                        {reasonText}
+                      </Tag>
+                      <Typography.Text style={reasonVisual.changeDaysStyle}>
+                        {formatHistoryChangeDays(item)}
+                      </Typography.Text>
+                    </Space>
+                    {item.externalNote ? (
+                      <Typography.Text type="secondary">
+                        {item.externalNote}
+                      </Typography.Text>
+                    ) : null}
                     <Typography.Text type="secondary">
-                      {item.externalNote}
+                      {formatUnixSeconds(item.createdAt)}
                     </Typography.Text>
-                  ) : null}
-                  <Typography.Text type="secondary">
-                    {formatUnixSeconds(item.createdAt)}
-                  </Typography.Text>
-                  <Typography.Text type="secondary">
-                    到期变更：{formatUnixSeconds(item.expireBefore)} →{" "}
-                    {formatUnixSeconds(item.expireAfter)}
-                  </Typography.Text>
-                </Space>
-              ),
-            }))}
+                    <Typography.Text type="secondary">
+                      到期变更：{formatUnixSeconds(item.expireBefore)} →{" "}
+                      {formatUnixSeconds(item.expireAfter)}
+                    </Typography.Text>
+                  </Space>
+                ),
+              };
+            })}
           />
         ) : (
           <Empty
