@@ -159,6 +159,7 @@ export interface UserStatusHistoryRecordDTO {
 export interface UserStatusDTO extends UserSummaryDTO {
   status: MembershipStatus;
   remainingDays: number;
+  usedDays: number;
 }
 
 export interface UserStatusResponseDTO {

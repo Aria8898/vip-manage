@@ -144,6 +144,10 @@ interface DashboardTodayRow {
   total_change_days: number | string | null;
 }
 
+interface UserTotalChangeDaysRow {
+  total_change_days: number | string | null;
+}
+
 interface RechargeRebuildRow {
   id: string;
   change_days: number;
@@ -771,6 +775,15 @@ app.get("/api/status/:token", async (c) => {
     return fail(c, 404, "user not found");
   }
 
+  const totalChangeDaysRow = await c.env.DB.prepare(
+    `SELECT
+      COALESCE(SUM(change_days), 0) AS total_change_days
+     FROM recharge_records
+     WHERE user_id = ?`
+  )
+    .bind(user.id)
+    .first<UserTotalChangeDaysRow>();
+
   const hasRechargeTimeline = await hasRechargeTimelineColumns(c.env.DB);
   const historyRows = hasRechargeTimeline
     ? await c.env.DB.prepare(
@@ -811,6 +824,8 @@ app.get("/api/status/:token", async (c) => {
     user.expire_at > now
       ? Math.ceil((user.expire_at - now) / SECONDS_PER_DAY)
       : 0;
+  const totalChangeDays = Number(totalChangeDaysRow?.total_change_days || 0);
+  const usedDays = Math.max(totalChangeDays - remainingDays, 0);
   const payload: UserStatusResponseDTO = {
     user: {
       id: user.id,
@@ -820,7 +835,8 @@ app.get("/api/status/:token", async (c) => {
         user.expire_at > now
           ? MembershipStatus.ACTIVE
           : MembershipStatus.EXPIRED,
-      remainingDays
+      remainingDays,
+      usedDays
     },
     history: (historyRows.results || []).map((row) =>
       toUserStatusHistoryRecordDTO(row)

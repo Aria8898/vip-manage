@@ -146,6 +146,9 @@ export const StatusShellPage = () => {
                 <Typography.Text type="secondary">
                   有效期至：{formatUnixSeconds(statusData.user.expireAt)}
                 </Typography.Text>
+                <Typography.Text type="secondary">
+                  已使用 {statusData.user.usedDays} 天
+                </Typography.Text>
               </Space>
             </Card>
 
