@@ -4,6 +4,8 @@ import { AdminRouteGuard } from "./components/AdminRouteGuard";
 import { AdminLoginPage } from "./pages/AdminLoginPage";
 import { AdminShellPage } from "./pages/AdminShellPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
+import { ReferralRewardsPage } from "./pages/ReferralRewardsPage";
+import { ReferralWithdrawalsPage } from "./pages/ReferralWithdrawalsPage";
 import { StatusShellPage } from "./pages/StatusShellPage";
 
 const App = () => {
@@ -17,6 +19,22 @@ const App = () => {
           element={
             <AdminRouteGuard>
               <AdminShellPage />
+            </AdminRouteGuard>
+          }
+        />
+        <Route
+          path="/admin/referral-rewards"
+          element={
+            <AdminRouteGuard>
+              <ReferralRewardsPage />
+            </AdminRouteGuard>
+          }
+        />
+        <Route
+          path="/admin/referral-withdrawals"
+          element={
+            <AdminRouteGuard>
+              <ReferralWithdrawalsPage />
             </AdminRouteGuard>
           }
         />

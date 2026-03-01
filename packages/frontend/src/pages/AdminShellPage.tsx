@@ -74,6 +74,11 @@ interface BackfillFormValues {
   externalNote?: string;
 }
 
+interface RefundFormValues {
+  refundNote?: string;
+  refundAmount?: number;
+}
+
 interface UpdateUserFormValues {
   username: string;
   systemEmail?: string;
@@ -159,6 +164,7 @@ export const AdminShellPage = () => {
   const [updateUserForm] = Form.useForm<UpdateUserFormValues>();
   const [rechargeForm] = Form.useForm<RechargeFormValues>();
   const [backfillForm] = Form.useForm<BackfillFormValues>();
+  const [refundForm] = Form.useForm<RefundFormValues>();
   const [messageApi, messageContextHolder] = message.useMessage();
   const [username, setUsername] = useState<string>("-");
   const [expiresAt, setExpiresAt] = useState<number>(0);
@@ -203,7 +209,10 @@ export const AdminShellPage = () => {
     useState<AdminUserDTO | null>(null);
   const [resettingTokenUserId, setResettingTokenUserId] = useState("");
   const [withdrawingUserId, setWithdrawingUserId] = useState("");
-  const [refundingRecordId, setRefundingRecordId] = useState("");
+  const [refundModalOpen, setRefundModalOpen] = useState(false);
+  const [refundTargetRecord, setRefundTargetRecord] =
+    useState<AdminRechargeRecordDTO | null>(null);
+  const [submittingRefund, setSubmittingRefund] = useState(false);
   const rechargeMode = Form.useWatch("mode", rechargeForm) ?? "dateRange";
   const rechargeDateRange = Form.useWatch("dateRange", rechargeForm);
   const backfillMode = Form.useWatch("mode", backfillForm) ?? "dateRange";
@@ -458,6 +467,12 @@ export const AdminShellPage = () => {
     updateUserForm.resetFields();
   }, [updateUserForm]);
 
+  const closeRefundModal = useCallback(() => {
+    setRefundModalOpen(false);
+    setRefundTargetRecord(null);
+    refundForm.resetFields();
+  }, [refundForm]);
+
   const handleOpenUpdateModal = (user: AdminUserDTO) => {
     setUpdateTargetUser(user);
     setUpdateModalOpen(true);
@@ -683,6 +698,15 @@ export const AdminShellPage = () => {
     }
   };
 
+  const handleOpenRefundModal = (record: AdminRechargeRecordDTO) => {
+    setRefundTargetRecord(record);
+    setRefundModalOpen(true);
+    refundForm.setFieldsValue({
+      refundNote: "",
+      refundAmount: record.paymentAmount,
+    });
+  };
+
   const handleWithdrawRewards = async (user: AdminUserDTO) => {
     setWithdrawingUserId(user.id);
 
@@ -709,14 +733,25 @@ export const AdminShellPage = () => {
     }
   };
 
-  const handleRefundRechargeRecord = async (record: AdminRechargeRecordDTO) => {
-    setRefundingRecordId(record.id);
+  const handleRefundRechargeRecord = async () => {
+    if (!refundTargetRecord) {
+      return;
+    }
 
     try {
+      const values = await refundForm.validateFields();
+      setSubmittingRefund(true);
       const response = await apiRequest<AdminRefundRechargeResponseDTO>(
-        `/admin/recharge-records/${encodeURIComponent(record.id)}/refund`,
+        `/admin/recharge-records/${encodeURIComponent(refundTargetRecord.id)}/refund`,
         {
           method: "POST",
+          body: JSON.stringify({
+            refundNote: values.refundNote?.trim() || undefined,
+            refundAmount:
+              typeof values.refundAmount === "number"
+                ? values.refundAmount
+                : undefined,
+          }),
         },
       );
       await Promise.all([
@@ -725,13 +760,21 @@ export const AdminShellPage = () => {
         loadReferralDashboard(),
         loadRechargeRecords(),
       ]);
+      closeRefundModal();
       messageApi.success(
         `退款回滚完成：${response.data.user.username}，当前到期 ${formatUnixSeconds(response.data.user.expireAt)}`,
       );
     } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "errorFields" in error
+      ) {
+        return;
+      }
       messageApi.error(error instanceof Error ? error.message : "退款失败");
     } finally {
-      setRefundingRecordId("");
+      setSubmittingRefund(false);
     }
   };
 
@@ -1224,25 +1267,14 @@ export const AdminShellPage = () => {
             record.source !== RechargeRecordSource.REFUND_ROLLBACK;
 
           return (
-            <Popconfirm
-              title="确认退款并回滚天数？"
-              description="将回滚本笔充值天数，并取消对应邀请奖励。"
-              okText="确认退款"
-              cancelText="取消"
-              onConfirm={() => {
-                void handleRefundRechargeRecord(record);
-              }}
+            <Button
+              danger
+              size="small"
               disabled={!canRefund}
+              onClick={() => handleOpenRefundModal(record)}
             >
-              <Button
-                danger
-                size="small"
-                loading={refundingRecordId === record.id}
-                disabled={!canRefund}
-              >
-                退款
-              </Button>
-            </Popconfirm>
+              退款
+            </Button>
           );
         },
       },
@@ -1252,8 +1284,7 @@ export const AdminShellPage = () => {
       formatRechargeReason,
       formatRechargeSource,
       formatUnixSeconds,
-      handleRefundRechargeRecord,
-      refundingRecordId,
+      handleOpenRefundModal,
     ],
   );
 
@@ -1348,6 +1379,12 @@ export const AdminShellPage = () => {
           <Space>
             <Button type="primary" onClick={() => setCreateModalOpen(true)}>
               新增用户
+            </Button>
+            <Button onClick={() => navigate("/admin/referral-rewards")}>
+              奖励流水
+            </Button>
+            <Button onClick={() => navigate("/admin/referral-withdrawals")}>
+              提现流水
             </Button>
             <Button onClick={handleLogout} loading={loggingOut}>
               退出登录
@@ -2075,6 +2112,93 @@ export const AdminShellPage = () => {
                 showCount
                 rows={3}
                 placeholder="可选，用户状态页会展示该备注"
+              />
+            </Form.Item>
+          </Form>
+        </Space>
+      </Modal>
+
+      <Modal
+        title="退款并回滚"
+        open={refundModalOpen}
+        okText="确认退款"
+        cancelText="取消"
+        confirmLoading={submittingRefund}
+        onOk={() => {
+          void handleRefundRechargeRecord();
+        }}
+        onCancel={closeRefundModal}
+      >
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          <Card size="small">
+            <Typography.Text>
+              退款用户：{refundTargetRecord?.username || "-"}（
+              {refundTargetRecord?.userId || "-"}）
+            </Typography.Text>
+            <br />
+            <Typography.Text type="secondary">
+              充值流水：{refundTargetRecord?.id || "-"}
+            </Typography.Text>
+            <br />
+            <Typography.Text type="secondary">
+              充值金额：{formatPaymentAmount(refundTargetRecord?.paymentAmount || 0)}
+            </Typography.Text>
+          </Card>
+
+          <Form<RefundFormValues> layout="vertical" form={refundForm}>
+            <Form.Item
+              label="退款金额（元）"
+              name="refundAmount"
+              rules={[
+                {
+                  required: true,
+                  message: "请输入退款金额",
+                },
+                {
+                  validator: (_, value: number | undefined) => {
+                    if (typeof value !== "number") {
+                      return Promise.resolve();
+                    }
+
+                    if (value < 0) {
+                      return Promise.reject(new Error("退款金额不能小于 0"));
+                    }
+
+                    const maxAmount = refundTargetRecord?.paymentAmount ?? 0;
+                    if (value > maxAmount) {
+                      return Promise.reject(
+                        new Error(`退款金额不能超过 ${maxAmount.toFixed(2)} 元`),
+                      );
+                    }
+
+                    return Promise.resolve();
+                  },
+                },
+              ]}
+            >
+              <InputNumber
+                min={0}
+                precision={2}
+                step={0.01}
+                style={{ width: "100%" }}
+                placeholder="默认等于充值金额"
+              />
+            </Form.Item>
+            <Form.Item
+              label="退款备注"
+              name="refundNote"
+              rules={[
+                {
+                  max: MAX_INTERNAL_NOTE_LENGTH,
+                  message: `最多 ${MAX_INTERNAL_NOTE_LENGTH} 个字符`,
+                },
+              ]}
+            >
+              <Input.TextArea
+                showCount
+                rows={3}
+                maxLength={MAX_INTERNAL_NOTE_LENGTH}
+                placeholder="建议记录退款原因、外部退款单号"
               />
             </Form.Item>
           </Form>
