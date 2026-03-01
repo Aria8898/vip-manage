@@ -210,6 +210,14 @@ body {
   max-width: 1200px;
 }
 
+.status-shell {
+  max-width: 820px;
+}
+
+.status-history-card {
+  margin-top: 16px;
+}
+
 .admin-header-card,
 .admin-overview-card,
 .admin-table-card,

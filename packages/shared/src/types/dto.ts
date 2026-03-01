@@ -1,4 +1,4 @@
-import type { RechargeReason } from "../enums/common";
+import type { MembershipStatus, RechargeReason } from "../enums/common";
 
 export interface HealthDTO {
   status: "ok";
@@ -86,4 +86,28 @@ export interface AdminDashboardTodayDTO {
   dayEndAt: number;
   rechargeCount: number;
   totalChangeDays: number;
+}
+
+export interface AdminResetUserTokenResponseDTO {
+  user: AdminUserDTO;
+}
+
+export interface UserStatusHistoryRecordDTO {
+  id: string;
+  changeDays: number;
+  reason: RechargeReason;
+  expireBefore: number;
+  expireAfter: number;
+  createdAt: number;
+}
+
+export interface UserStatusDTO extends UserSummaryDTO {
+  status: MembershipStatus;
+  remainingDays: number;
+}
+
+export interface UserStatusResponseDTO {
+  user: UserStatusDTO;
+  history: UserStatusHistoryRecordDTO[];
+  now: number;
 }

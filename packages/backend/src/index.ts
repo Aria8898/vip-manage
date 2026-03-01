@@ -2,11 +2,13 @@ import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { sign, verify } from "hono/jwt";
 import {
+  MembershipStatus,
   RechargeReason,
   type AdminCreateUserRequestDTO,
   type AdminCreateUserResponseDTO,
   type AdminDashboardTodayDTO,
   type AdminListRechargeRecordsResponseDTO,
+  type AdminResetUserTokenResponseDTO,
   type AdminListUsersResponseDTO,
   type AdminLoginRequestDTO,
   type AdminLoginResponseDTO,
@@ -16,7 +18,9 @@ import {
   type AdminSessionDTO,
   type AdminUserDTO,
   type ApiResponse,
-  type HealthDTO
+  type HealthDTO,
+  type UserStatusHistoryRecordDTO,
+  type UserStatusResponseDTO
 } from "@vip/shared";
 
 import { createRequestId } from "./lib/request-id";
@@ -51,6 +55,7 @@ const DEFAULT_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
 const DEFAULT_USER_TOKEN_VERSION = 1;
 const DEFAULT_RECHARGE_RECORD_LIMIT = 100;
 const MAX_RECHARGE_RECORD_LIMIT = 200;
+const DEFAULT_STATUS_HISTORY_LIMIT = 50;
 const USER_LIST_LIMIT = 100;
 const MAX_REMARK_NAME_LENGTH = 80;
 const MAX_INTERNAL_NOTE_LENGTH = 200;
@@ -101,6 +106,30 @@ interface RechargeRecordRow {
 interface DashboardTodayRow {
   recharge_count: number | string | null;
   total_change_days: number | string | null;
+}
+
+interface UserStatusRow {
+  id: string;
+  remark_name: string;
+  expire_at: number;
+}
+
+interface UserStatusHistoryRow {
+  id: string;
+  change_days: number;
+  reason: string;
+  expire_before: number;
+  expire_after: number;
+  created_at: number;
+}
+
+interface ResetTokenTargetUserRow {
+  id: string;
+  remark_name: string;
+  expire_at: number;
+  created_at: number;
+  token_version: number;
+  access_token_hash: string;
 }
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -288,6 +317,17 @@ const toAdminRechargeRecordDTO = (row: RechargeRecordRow): AdminRechargeRecordDT
   createdAt: row.created_at
 });
 
+const toUserStatusHistoryRecordDTO = (
+  row: UserStatusHistoryRow
+): UserStatusHistoryRecordDTO => ({
+  id: row.id,
+  changeDays: row.change_days,
+  reason: toRechargeReason(row.reason),
+  expireBefore: row.expire_before,
+  expireAfter: row.expire_after,
+  createdAt: row.created_at
+});
+
 const toUtc8DayRange = (
   timestamp: number
 ): {
@@ -380,6 +420,58 @@ app.get("/api/health", (c) => {
     },
     "ok"
   );
+});
+
+app.get("/api/status/:token", async (c) => {
+  const token = c.req.param("token")?.trim();
+  if (!token) {
+    return fail(c, 400, "token is required");
+  }
+
+  const tokenHash = await sha256Hex(token);
+  const user = await c.env.DB.prepare(
+    "SELECT id, remark_name, expire_at FROM users WHERE access_token_hash = ? LIMIT 1"
+  )
+    .bind(tokenHash)
+    .first<UserStatusRow>();
+
+  if (!user) {
+    return fail(c, 404, "user not found");
+  }
+
+  const historyRows = await c.env.DB.prepare(
+    `SELECT id, change_days, reason, expire_before, expire_after, created_at
+     FROM recharge_records
+     WHERE user_id = ?
+     ORDER BY created_at DESC, id DESC
+     LIMIT ?`
+  )
+    .bind(user.id, DEFAULT_STATUS_HISTORY_LIMIT)
+    .all<UserStatusHistoryRow>();
+
+  const now = getCurrentTimestamp();
+  const remainingDays =
+    user.expire_at > now
+      ? Math.ceil((user.expire_at - now) / SECONDS_PER_DAY)
+      : 0;
+  const payload: UserStatusResponseDTO = {
+    user: {
+      id: user.id,
+      remarkName: user.remark_name,
+      expireAt: user.expire_at,
+      status:
+        user.expire_at > now
+          ? MembershipStatus.ACTIVE
+          : MembershipStatus.EXPIRED,
+      remainingDays
+    },
+    history: (historyRows.results || []).map((row) =>
+      toUserStatusHistoryRecordDTO(row)
+    ),
+    now
+  };
+
+  return ok(c, payload);
 });
 
 app.post("/api/admin/login", async (c) => {
@@ -663,6 +755,120 @@ app.post("/api/admin/users/:id/recharge", async (c) => {
   }
 
   return fail(c, 500, "recharge conflict, please retry");
+});
+
+app.post("/api/admin/users/:id/reset-token", async (c) => {
+  const tokenSecret = getUserTokenSecret(c.env);
+  if (!tokenSecret) {
+    return fail(c, 500, "user token secret is not configured");
+  }
+
+  const userId = c.req.param("id")?.trim();
+  if (!userId) {
+    return fail(c, 400, "user id is required");
+  }
+
+  const hasTokenVersionColumn = await hasUsersTokenVersionColumn(c.env.DB);
+  if (!hasTokenVersionColumn) {
+    return fail(c, 500, "token reset requires users.token_version migration");
+  }
+
+  const now = getCurrentTimestamp();
+  const session = c.get("adminSession");
+
+  try {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const user = await c.env.DB.prepare(
+        `SELECT
+          id,
+          remark_name,
+          expire_at,
+          created_at,
+          token_version,
+          access_token_hash
+        FROM users
+        WHERE id = ?
+        LIMIT 1`
+      )
+        .bind(userId)
+        .first<ResetTokenTargetUserRow>();
+
+      if (!user) {
+        return fail(c, 404, "user not found");
+      }
+
+      const oldTokenHash = user.access_token_hash;
+      const nextTokenVersion = Math.max(
+        user.token_version || DEFAULT_USER_TOKEN_VERSION,
+        DEFAULT_USER_TOKEN_VERSION
+      ) + 1;
+      const nextStatusToken = await buildUserStatusToken(
+        user.id,
+        nextTokenVersion,
+        tokenSecret
+      );
+      const newTokenHash = await sha256Hex(nextStatusToken);
+      const updateResult = await c.env.DB.prepare(
+        `UPDATE users
+         SET access_token_hash = ?, token_version = ?, updated_at = ?
+         WHERE id = ? AND access_token_hash = ? AND token_version = ?`
+      )
+        .bind(
+          newTokenHash,
+          nextTokenVersion,
+          now,
+          user.id,
+          oldTokenHash,
+          user.token_version
+        )
+        .run();
+      const updateChanges = Number(updateResult.meta?.changes || 0);
+
+      if (updateChanges === 0) {
+        continue;
+      }
+
+      const resetLogId = crypto.randomUUID();
+      await c.env.DB.prepare(
+        `INSERT INTO token_reset_logs (
+          id,
+          user_id,
+          old_token_hash,
+          new_token_hash,
+          operator_admin_id,
+          created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)`
+      )
+        .bind(
+          resetLogId,
+          user.id,
+          oldTokenHash,
+          newTokenHash,
+          session.adminId,
+          now
+        )
+        .run();
+
+      const payload: AdminResetUserTokenResponseDTO = {
+        user: {
+          id: user.id,
+          remarkName: user.remark_name,
+          expireAt: user.expire_at,
+          createdAt: user.created_at,
+          updatedAt: now,
+          tokenVersion: nextTokenVersion,
+          statusToken: nextStatusToken
+        }
+      };
+
+      return ok(c, payload);
+    }
+  } catch (error) {
+    console.error("reset token failed", error);
+    return fail(c, 500, "failed to reset user token");
+  }
+
+  return fail(c, 500, "reset token conflict, please retry");
 });
 
 app.get("/api/admin/recharge-records", async (c) => {

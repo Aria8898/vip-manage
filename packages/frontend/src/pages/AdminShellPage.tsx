@@ -4,6 +4,7 @@ import {
   type AdminCreateUserResponseDTO,
   type AdminDashboardTodayDTO,
   type AdminListRechargeRecordsResponseDTO,
+  type AdminResetUserTokenResponseDTO,
   type AdminListUsersResponseDTO,
   type AdminRechargeRecordDTO,
   type AdminRechargeUserResponseDTO,
@@ -17,6 +18,7 @@ import {
   Input,
   InputNumber,
   Modal,
+  Popconfirm,
   Row,
   Select,
   Space,
@@ -75,6 +77,7 @@ export const AdminShellPage = () => {
   const [rechargeModalOpen, setRechargeModalOpen] = useState(false);
   const [submittingRecharge, setSubmittingRecharge] = useState(false);
   const [rechargeTargetUser, setRechargeTargetUser] = useState<AdminUserDTO | null>(null);
+  const [resettingTokenUserId, setResettingTokenUserId] = useState("");
 
   const loadUsers = useCallback(async (query: string) => {
     setLoadingUsers(true);
@@ -258,6 +261,28 @@ export const AdminShellPage = () => {
     });
   };
 
+  const handleResetToken = async (user: AdminUserDTO) => {
+    setResettingTokenUserId(user.id);
+
+    try {
+      const response = await apiRequest<AdminResetUserTokenResponseDTO>(
+        `/admin/users/${encodeURIComponent(user.id)}/reset-token`,
+        {
+          method: "POST"
+        }
+      );
+      const statusLink = buildStatusLink(response.data.user.statusToken);
+      await navigator.clipboard.writeText(statusLink);
+      setCopiedUserId(user.id);
+      await loadUsers(activeQuery);
+      messageApi.success(`已重置并复制新链接：${user.remarkName}`);
+    } catch (error) {
+      messageApi.error(error instanceof Error ? error.message : "重置 Token 失败");
+    } finally {
+      setResettingTokenUserId("");
+    }
+  };
+
   const handleRechargeSubmit = async () => {
     if (!rechargeTargetUser) {
       return;
@@ -349,18 +374,38 @@ export const AdminShellPage = () => {
       {
         title: "操作",
         key: "actions",
-        width: 200,
+        width: 320,
         render: (_, user) => (
           <Space size="small" wrap>
             <Button type={copiedUserId === user.id ? "default" : "primary"} onClick={() => handleCopyLink(user)}>
               {copiedUserId === user.id ? "已复制" : "复制链接"}
             </Button>
             <Button onClick={() => handleOpenRechargeModal(user)}>充值</Button>
+            <Popconfirm
+              title="重置 Token"
+              description="旧链接会立即失效，确认继续？"
+              okText="确认重置"
+              cancelText="取消"
+              onConfirm={() => {
+                void handleResetToken(user);
+              }}
+            >
+              <Button danger loading={resettingTokenUserId === user.id}>
+                重置 Token
+              </Button>
+            </Popconfirm>
           </Space>
         )
       }
     ],
-    [copiedUserId, formatUnixSeconds, handleCopyLink]
+    [
+      copiedUserId,
+      formatUnixSeconds,
+      handleCopyLink,
+      handleOpenRechargeModal,
+      handleResetToken,
+      resettingTokenUserId
+    ]
   );
 
   const rechargeRecordColumns = useMemo<ColumnsType<AdminRechargeRecordDTO>>(
@@ -440,7 +485,7 @@ export const AdminShellPage = () => {
         <div className="admin-header-row">
           <div>
             <Typography.Title level={3} style={{ margin: 0 }}>
-              用户管理（P3 充值与审计）
+              用户管理（P4 用户端完善）
             </Typography.Title>
             <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
               已登录账号：{username}
