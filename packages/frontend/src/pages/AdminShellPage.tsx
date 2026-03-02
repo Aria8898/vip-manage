@@ -13,6 +13,7 @@ import {
   type AdminListUsersResponseDTO,
   type AdminRechargeRecordDTO,
   type AdminRechargeUserResponseDTO,
+  type AdminUpdateUserInviteCodeResponseDTO,
   type AdminUpdateUserResponseDTO,
   type AdminUserDTO,
   type AdminUserProfileChangeRecordDTO,
@@ -51,7 +52,7 @@ interface CreateUserFormValues {
   systemEmail?: string;
   familyGroupName?: string;
   userEmail?: string;
-  inviterUserId?: string;
+  inviterCode?: string;
 }
 
 interface RechargeFormValues {
@@ -90,6 +91,10 @@ interface UpdateUserFormValues {
   userEmailNote?: string;
 }
 
+interface UpdateInviteCodeFormValues {
+  customInviteCode?: string;
+}
+
 const RECHARGE_REASON_LABELS: Record<RechargeReason, string> = {
   [RechargeReason.WECHAT_PAY]: "微信支付",
   [RechargeReason.ALIPAY]: "支付宝支付",
@@ -110,8 +115,11 @@ const RECHARGE_SOURCE_LABELS: Record<RechargeRecordSource, string> = {
 const MAX_INTERNAL_NOTE_LENGTH = 200;
 const MAX_EXTERNAL_NOTE_LENGTH = 200;
 const MAX_PROFILE_CHANGE_NOTE_LENGTH = 200;
+const MIN_CUSTOM_INVITE_CODE_LENGTH = 4;
+const MAX_CUSTOM_INVITE_CODE_LENGTH = 32;
 const MAX_RECHARGE_DAYS = 3650;
 const SECONDS_PER_DAY = 24 * 60 * 60;
+const INVITE_CODE_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 type RechargeInputMode = "days" | "dateRange";
 type RechargeDateValue = {
@@ -163,6 +171,7 @@ export const AdminShellPage = () => {
   const navigate = useNavigate();
   const [createUserForm] = Form.useForm<CreateUserFormValues>();
   const [updateUserForm] = Form.useForm<UpdateUserFormValues>();
+  const [inviteCodeForm] = Form.useForm<UpdateInviteCodeFormValues>();
   const [rechargeForm] = Form.useForm<RechargeFormValues>();
   const [backfillForm] = Form.useForm<BackfillFormValues>();
   const [refundForm] = Form.useForm<RefundFormValues>();
@@ -204,6 +213,10 @@ export const AdminShellPage = () => {
   const [updateTargetUser, setUpdateTargetUser] = useState<AdminUserDTO | null>(
     null,
   );
+  const [inviteCodeModalOpen, setInviteCodeModalOpen] = useState(false);
+  const [submittingInviteCode, setSubmittingInviteCode] = useState(false);
+  const [inviteCodeTargetUser, setInviteCodeTargetUser] =
+    useState<AdminUserDTO | null>(null);
   const [backfillModalOpen, setBackfillModalOpen] = useState(false);
   const [submittingBackfill, setSubmittingBackfill] = useState(false);
   const [backfillTargetUser, setBackfillTargetUser] =
@@ -468,6 +481,12 @@ export const AdminShellPage = () => {
     updateUserForm.resetFields();
   }, [updateUserForm]);
 
+  const closeInviteCodeModal = useCallback(() => {
+    setInviteCodeModalOpen(false);
+    setInviteCodeTargetUser(null);
+    inviteCodeForm.resetFields();
+  }, [inviteCodeForm]);
+
   const closeRefundModal = useCallback(() => {
     setRefundModalOpen(false);
     setRefundTargetRecord(null);
@@ -575,6 +594,52 @@ export const AdminShellPage = () => {
     }
   };
 
+  const handleOpenInviteCodeModal = (user: AdminUserDTO) => {
+    setInviteCodeTargetUser(user);
+    setInviteCodeModalOpen(true);
+    inviteCodeForm.setFieldsValue({
+      customInviteCode: user.customInviteCode || undefined,
+    });
+  };
+
+  const handleUpdateInviteCodeSubmit = async () => {
+    if (!inviteCodeTargetUser) {
+      return;
+    }
+
+    try {
+      const values = await inviteCodeForm.validateFields();
+      const customInviteCode = values.customInviteCode?.trim() || undefined;
+      setSubmittingInviteCode(true);
+      const response = await apiRequest<AdminUpdateUserInviteCodeResponseDTO>(
+        `/admin/users/${encodeURIComponent(inviteCodeTargetUser.id)}/invite-code`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            customInviteCode,
+          }),
+        },
+      );
+
+      closeInviteCodeModal();
+      await loadUsers(activeQuery);
+      messageApi.success(`邀请码已更新：${response.data.user.username}`);
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "errorFields" in error
+      ) {
+        return;
+      }
+      messageApi.error(
+        error instanceof Error ? error.message : "更新邀请码失败",
+      );
+    } finally {
+      setSubmittingInviteCode(false);
+    }
+  };
+
   const handleCreateUserSubmit = async () => {
     try {
       const values = await createUserForm.validateFields();
@@ -585,7 +650,7 @@ export const AdminShellPage = () => {
       const systemEmail = values.systemEmail?.trim().toLowerCase() || undefined;
       const familyGroupName = values.familyGroupName?.trim() || undefined;
       const userEmail = values.userEmail?.trim().toLowerCase() || undefined;
-      const inviterUserId = values.inviterUserId?.trim() || undefined;
+      const inviterCode = values.inviterCode?.trim() || undefined;
 
       setSubmittingCreate(true);
       const response = await apiRequest<AdminCreateUserResponseDTO>(
@@ -597,7 +662,7 @@ export const AdminShellPage = () => {
             systemEmail,
             familyGroupName,
             userEmail,
-            inviterUserId,
+            inviterCode,
           }),
         },
       );
@@ -945,6 +1010,23 @@ export const AdminShellPage = () => {
         ),
       },
       {
+        title: "邀请码",
+        key: "inviteCode",
+        width: 170,
+        render: (_, record) => {
+          const systemInviteCode = record.systemInviteCode || "-";
+          const customInviteCode = record.customInviteCode;
+          return (
+            <Space direction="vertical" size={0}>
+              <Typography.Text code>{systemInviteCode}</Typography.Text>
+              <Typography.Text type="secondary" code>
+                {customInviteCode ? `自定义: ${customInviteCode}` : "自定义: -"}
+              </Typography.Text>
+            </Space>
+          );
+        },
+      },
+      {
         title: "家庭组名称",
         dataIndex: "familyGroupName",
         key: "familyGroupName",
@@ -1050,7 +1132,7 @@ export const AdminShellPage = () => {
         title: "操作",
         key: "actions",
         fixed: "right",
-        width: 340,
+        width: 380,
         render: (_, user) => {
           const netWithdrawableAmount =
             user.netWithdrawableAmount ?? user.availableRewardAmount ?? 0;
@@ -1084,6 +1166,15 @@ export const AdminShellPage = () => {
                   aria-label="编辑资料"
                 >
                   ✎
+                </Button>
+              </Tooltip>
+              <Tooltip title="邀请码">
+                <Button
+                  shape="circle"
+                  onClick={() => handleOpenInviteCodeModal(user)}
+                  aria-label="邀请码"
+                >
+                  码
                 </Button>
               </Tooltip>
               <Tooltip title="充值">
@@ -1156,6 +1247,7 @@ export const AdminShellPage = () => {
       handleCopyLink,
       handleOpenLink,
       handleOpenBackfillModal,
+      handleOpenInviteCodeModal,
       handleOpenRechargeModal,
       handleOpenUpdateModal,
       handleResetToken,
@@ -1509,7 +1601,7 @@ export const AdminShellPage = () => {
           <Input.Search
             value={searchQueryInput}
             allowClear
-            placeholder="按用户名或用户 ID 搜索"
+            placeholder="按用户名、用户 ID 或邀请码搜索"
             enterButton="搜索"
             onChange={(event) => setSearchQueryInput(event.target.value)}
             onSearch={(value) => {
@@ -1660,18 +1752,86 @@ export const AdminShellPage = () => {
             <Input placeholder="可选，例如：user@example.com" />
           </Form.Item>
           <Form.Item
-            label="邀请人用户 ID"
-            name="inviterUserId"
+            label="邀请人邀请码/口令"
+            name="inviterCode"
             rules={[
               {
-                max: 80,
-                message: "最多 80 个字符",
+                max: 64,
+                message: "最多 64 个字符",
               },
             ]}
           >
-            <Input placeholder="可选，填用户 ID 绑定邀请关系" />
+            <Input placeholder="可选，填邀请码、口令或用户 ID 绑定邀请关系" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        title="设置邀请口令"
+        open={inviteCodeModalOpen}
+        okText="保存口令"
+        cancelText="取消"
+        confirmLoading={submittingInviteCode}
+        onOk={() => {
+          void handleUpdateInviteCodeSubmit();
+        }}
+        onCancel={closeInviteCodeModal}
+      >
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          <Card size="small">
+            <Space direction="vertical" size={2}>
+              <Typography.Text>
+                用户：{inviteCodeTargetUser?.username || "-"}（
+                {inviteCodeTargetUser?.id || "-"}）
+              </Typography.Text>
+              <Typography.Text type="secondary">
+                系统短码：{inviteCodeTargetUser?.systemInviteCode || "-"}
+              </Typography.Text>
+            </Space>
+          </Card>
+
+          <Form<UpdateInviteCodeFormValues>
+            layout="vertical"
+            form={inviteCodeForm}
+          >
+            <Form.Item
+              label="自定义口令"
+              name="customInviteCode"
+              rules={[
+                {
+                  max: MAX_CUSTOM_INVITE_CODE_LENGTH,
+                  message: `最多 ${MAX_CUSTOM_INVITE_CODE_LENGTH} 个字符`,
+                },
+                {
+                  validator: (_, value: string | undefined) => {
+                    const normalized = value?.trim();
+                    if (!normalized) {
+                      return Promise.resolve();
+                    }
+                    if (normalized.length < MIN_CUSTOM_INVITE_CODE_LENGTH) {
+                      return Promise.reject(
+                        new Error(`至少 ${MIN_CUSTOM_INVITE_CODE_LENGTH} 个字符`),
+                      );
+                    }
+                    if (!INVITE_CODE_PATTERN.test(normalized)) {
+                      return Promise.reject(
+                        new Error("仅支持字母、数字、下划线和短横线"),
+                      );
+                    }
+                    return Promise.resolve();
+                  },
+                },
+              ]}
+              extra="留空并保存可清空当前自定义口令，系统短码始终可用。"
+            >
+              <Input
+                allowClear
+                placeholder="例如：alice88"
+                maxLength={MAX_CUSTOM_INVITE_CODE_LENGTH}
+              />
+            </Form.Item>
+          </Form>
+        </Space>
       </Modal>
 
       <Modal

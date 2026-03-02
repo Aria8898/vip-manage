@@ -41,6 +41,7 @@ export interface AdminCreateUserRequestDTO {
   systemEmail?: string;
   familyGroupName?: string;
   userEmail?: string;
+  inviterCode?: string;
   inviterUserId?: string;
 }
 
@@ -48,6 +49,8 @@ export interface AdminUserDTO extends UserSummaryDTO {
   systemEmail: string | null;
   familyGroupName: string | null;
   userEmail: string | null;
+  systemInviteCode?: string | null;
+  customInviteCode?: string | null;
   createdAt: number;
   updatedAt: number;
   tokenVersion: number;
@@ -169,13 +172,22 @@ export interface AdminRefundRechargeResponseDTO {
 }
 
 export interface AdminBindUserReferralRequestDTO {
-  inviterUserId: string;
+  inviterCode?: string;
+  inviterUserId?: string;
 }
 
 export interface AdminBindUserReferralResponseDTO {
   inviterUserId: string;
   inviteeUserId: string;
   boundAt: number;
+}
+
+export interface AdminUpdateUserInviteCodeRequestDTO {
+  customInviteCode?: string;
+}
+
+export interface AdminUpdateUserInviteCodeResponseDTO {
+  user: AdminUserDTO;
 }
 
 export interface AdminReferralRewardRecordDTO {

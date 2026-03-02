@@ -31,6 +31,8 @@ import {
   type AdminRechargeUserResponseDTO,
   type AdminSessionDTO,
   type AdminUpdateUserRequestDTO,
+  type AdminUpdateUserInviteCodeRequestDTO,
+  type AdminUpdateUserInviteCodeResponseDTO,
   type AdminUpdateUserResponseDTO,
   type AdminUserDTO,
   type AdminUserProfileChangeRecordDTO,
@@ -103,9 +105,14 @@ const MAX_REFUND_NOTE_LENGTH = 200;
 const MAX_WITHDRAW_NOTE_LENGTH = 200;
 const MAX_RECHARGE_DAYS = 3650;
 const MAX_PAYMENT_AMOUNT = 1000000;
+const SYSTEM_INVITE_CODE_LENGTH = 8;
+const MIN_CUSTOM_INVITE_CODE_LENGTH = 4;
+const MAX_CUSTOM_INVITE_CODE_LENGTH = 32;
 const SECONDS_PER_DAY = 24 * 60 * 60;
 const UTC8_OFFSET_SECONDS = 8 * 60 * 60;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
+const INVITE_CODE_PATTERN = /^[A-Za-z0-9_-]+$/u;
+const SYSTEM_INVITE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const COMPACT_USER_TOKEN_MARKER = 2;
 const COMPACT_USER_TOKEN_SIGNATURE_BYTES = 16;
 type HttpStatus = 200 | 400 | 401 | 404 | 409 | 429 | 500;
@@ -122,11 +129,25 @@ interface UserRow {
   system_email?: string | null;
   family_group_name?: string | null;
   user_email?: string | null;
+  system_invite_code?: string | null;
+  custom_invite_code?: string | null;
   expire_at: number;
   created_at: number;
   updated_at: number;
   token_version?: number;
   access_token_hash?: string;
+}
+
+interface InviteAliasRow {
+  id: string;
+  user_id: string;
+  alias: string;
+  alias_normalized: string;
+  status: string;
+}
+
+interface InviteCodeResolvedUserRow {
+  id: string;
 }
 
 interface SqliteTableInfoRow {
@@ -323,6 +344,8 @@ let cachedHasRechargeExternalNoteColumn: boolean | null = null;
 let cachedHasRechargeRefundColumns: boolean | null = null;
 let cachedHasReferralTables: boolean | null = null;
 let cachedHasReferralDailyUnlockColumns: boolean | null = null;
+let cachedHasUsersInviteCodeColumn: boolean | null = null;
+let cachedHasInviteAliasesTable: boolean | null = null;
 
 const getCurrentTimestamp = (): number => Math.floor(Date.now() / 1000);
 
@@ -535,6 +558,8 @@ const toAdminUserDTO = async (
     systemEmail: row.system_email ?? null,
     familyGroupName: row.family_group_name ?? null,
     userEmail: row.user_email ?? null,
+    systemInviteCode: row.system_invite_code ?? null,
+    customInviteCode: row.custom_invite_code ?? null,
     expireAt: row.expire_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -569,6 +594,36 @@ const hasUsersExtraProfileColumns = async (db: D1Database): Promise<boolean> => 
   cachedHasUsersExtraProfileColumns = hasColumns;
 
   return hasColumns;
+};
+
+const hasUsersInviteCodeColumn = async (db: D1Database): Promise<boolean> => {
+  if (cachedHasUsersInviteCodeColumn !== null) {
+    return cachedHasUsersInviteCodeColumn;
+  }
+
+  const rows = await db.prepare("PRAGMA table_info(users)").all<SqliteTableInfoRow>();
+  const hasColumn = (rows.results || []).some((row) => row.name === "system_invite_code");
+  cachedHasUsersInviteCodeColumn = hasColumn;
+
+  return hasColumn;
+};
+
+const hasInviteAliasesTable = async (db: D1Database): Promise<boolean> => {
+  if (cachedHasInviteAliasesTable !== null) {
+    return cachedHasInviteAliasesTable;
+  }
+
+  const row = await db
+    .prepare(
+      `SELECT name
+       FROM sqlite_master
+       WHERE type = 'table' AND name = 'invite_aliases'
+       LIMIT 1`
+    )
+    .first<SqliteTableInfoRow>();
+  cachedHasInviteAliasesTable = Boolean(row?.name);
+
+  return cachedHasInviteAliasesTable;
 };
 
 const hasRechargeTimelineColumns = async (db: D1Database): Promise<boolean> => {
@@ -702,6 +757,200 @@ const normalizeOptionalText = (value: unknown): string | null => {
   }
 
   return trimmed;
+};
+
+const normalizeInviteCode = (value: unknown): string | null => {
+  const normalized = normalizeOptionalText(value);
+  if (!normalized) {
+    return null;
+  }
+
+  return normalized;
+};
+
+const normalizeInviteAlias = (value: string): string => value.toLowerCase();
+
+const isValidCustomInviteCode = (value: string): boolean =>
+  value.length >= MIN_CUSTOM_INVITE_CODE_LENGTH &&
+  value.length <= MAX_CUSTOM_INVITE_CODE_LENGTH &&
+  INVITE_CODE_PATTERN.test(value);
+
+const buildRandomSystemInviteCode = (): string => {
+  const bytes = crypto.getRandomValues(new Uint8Array(SYSTEM_INVITE_CODE_LENGTH));
+  const chars = new Array<string>(SYSTEM_INVITE_CODE_LENGTH);
+  for (let index = 0; index < SYSTEM_INVITE_CODE_LENGTH; index += 1) {
+    const byte = bytes[index] as number;
+    chars[index] = SYSTEM_INVITE_CODE_ALPHABET[byte % SYSTEM_INVITE_CODE_ALPHABET.length] as string;
+  }
+  return chars.join("");
+};
+
+const generateUniqueSystemInviteCode = async (db: D1Database): Promise<string> => {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const candidate = buildRandomSystemInviteCode();
+    const existing = await db
+      .prepare("SELECT id FROM users WHERE system_invite_code = ? LIMIT 1")
+      .bind(candidate)
+      .first<{ id: string }>();
+    if (!existing) {
+      return candidate;
+    }
+  }
+
+  throw new Error("failed to generate unique system invite code");
+};
+
+const resolveInviterUserIdByCode = async (
+  db: D1Database,
+  inviteCode: string
+): Promise<string | null> => {
+  const normalizedInput = inviteCode.trim();
+  if (!normalizedInput) {
+    return null;
+  }
+
+  const hasAliasTable = await hasInviteAliasesTable(db);
+  if (hasAliasTable) {
+    const aliasMatch = await db
+      .prepare(
+        `SELECT user_id
+         FROM invite_aliases
+         WHERE alias_normalized = ? AND status = 'active'
+         LIMIT 1`
+      )
+      .bind(normalizeInviteAlias(normalizedInput))
+      .first<{ user_id: string }>();
+    if (aliasMatch?.user_id) {
+      return aliasMatch.user_id;
+    }
+  }
+
+  const hasInviteCodeColumn = await hasUsersInviteCodeColumn(db);
+  if (hasInviteCodeColumn) {
+    const systemCodeMatch = await db
+      .prepare(
+        `SELECT id
+         FROM users
+         WHERE system_invite_code = ?
+         LIMIT 1`
+      )
+      .bind(normalizedInput.toUpperCase())
+      .first<InviteCodeResolvedUserRow>();
+    if (systemCodeMatch?.id) {
+      return systemCodeMatch.id;
+    }
+  }
+
+  // Backward compatibility: allow binding by inviter user id.
+  const inviterById = await db
+    .prepare("SELECT id FROM users WHERE id = ? LIMIT 1")
+    .bind(normalizedInput)
+    .first<InviteCodeResolvedUserRow>();
+  return inviterById?.id ?? null;
+};
+
+const toInviteCodeValidationMessage = (): string =>
+  `customInviteCode must be ${MIN_CUSTOM_INVITE_CODE_LENGTH}-${MAX_CUSTOM_INVITE_CODE_LENGTH} chars and only include letters, numbers, _ or -`;
+
+const upsertUserCustomInviteAlias = async (
+  db: D1Database,
+  params: {
+    userId: string;
+    customInviteCode: string;
+    adminId: string;
+    now: number;
+  }
+): Promise<{
+  ok: true;
+  customInviteCode: string;
+} | {
+  ok: false;
+  status: 400 | 409;
+  message: string;
+}> => {
+  const customInviteCode = params.customInviteCode.trim();
+  if (!isValidCustomInviteCode(customInviteCode)) {
+    return {
+      ok: false,
+      status: 400,
+      message: toInviteCodeValidationMessage()
+    };
+  }
+
+  const aliasNormalized = normalizeInviteAlias(customInviteCode);
+  const existsByAlias = await db
+    .prepare(
+      `SELECT id, user_id, alias, alias_normalized, status
+       FROM invite_aliases
+       WHERE alias_normalized = ?
+       LIMIT 1`
+    )
+    .bind(aliasNormalized)
+    .first<InviteAliasRow>();
+  if (existsByAlias && existsByAlias.user_id !== params.userId) {
+    return {
+      ok: false,
+      status: 409,
+      message: "custom invite code already in use"
+    };
+  }
+
+  const disableCurrentStatement = db
+    .prepare(
+      `UPDATE invite_aliases
+       SET status = 'disabled', updated_by_admin_id = ?, updated_at = ?
+       WHERE user_id = ? AND status = 'active'`
+    )
+    .bind(params.adminId, params.now, params.userId);
+
+  if (existsByAlias) {
+    await db.batch([
+      disableCurrentStatement,
+      db
+        .prepare(
+          `UPDATE invite_aliases
+           SET alias = ?, status = 'active', updated_by_admin_id = ?, updated_at = ?
+           WHERE id = ?`
+        )
+        .bind(customInviteCode, params.adminId, params.now, existsByAlias.id)
+    ]);
+    return {
+      ok: true,
+      customInviteCode
+    };
+  }
+
+  await db.batch([
+    disableCurrentStatement,
+    db
+      .prepare(
+        `INSERT INTO invite_aliases (
+          id,
+          user_id,
+          alias,
+          alias_normalized,
+          status,
+          created_by_admin_id,
+          updated_by_admin_id,
+          created_at,
+          updated_at
+        ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)`
+      )
+      .bind(
+        crypto.randomUUID(),
+        params.userId,
+        customInviteCode,
+        aliasNormalized,
+        params.adminId,
+        params.adminId,
+        params.now,
+        params.now
+      )
+  ]);
+  return {
+    ok: true,
+    customInviteCode
+  };
 };
 
 const normalizeProfileChangeNote = (value: unknown): string | null => {
@@ -1051,6 +1300,28 @@ const requireReferralTables = async (
     return {
       ok: false,
       response: fail(c, 500, "database migration required: referral daily unlock columns missing")
+    };
+  }
+
+  return { ok: true };
+};
+
+const requireInviteCodeSupport = async (
+  c: AppContext
+): Promise<{ ok: true } | { ok: false; response: Response }> => {
+  const hasInviteCodeColumn = await hasUsersInviteCodeColumn(c.env.DB);
+  if (!hasInviteCodeColumn) {
+    return {
+      ok: false,
+      response: fail(c, 500, "database migration required: users.system_invite_code column missing")
+    };
+  }
+
+  const hasAliasTable = await hasInviteAliasesTable(c.env.DB);
+  if (!hasAliasTable) {
+    return {
+      ok: false,
+      response: fail(c, 500, "database migration required: invite_aliases table missing")
     };
   }
 
@@ -1733,7 +2004,9 @@ app.post("/api/admin/users", async (c) => {
   const systemEmail = normalizeOptionalText(body?.systemEmail)?.toLowerCase();
   const familyGroupName = normalizeOptionalText(body?.familyGroupName);
   const userEmail = normalizeOptionalText(body?.userEmail)?.toLowerCase();
-  const inviterUserId = normalizeOptionalText(body?.inviterUserId);
+  const inviterCode = normalizeInviteCode(body?.inviterCode);
+  const inviterUserIdInput = normalizeInviteCode(body?.inviterUserId);
+  const inviterLookupInput = inviterCode ?? inviterUserIdInput;
   if (familyGroupName && familyGroupName.length > MAX_FAMILY_GROUP_NAME_LENGTH) {
     return fail(c, 400, `familyGroupName must be <= ${MAX_FAMILY_GROUP_NAME_LENGTH} chars`);
   }
@@ -1749,7 +2022,7 @@ app.post("/api/admin/users", async (c) => {
   if (userEmail && !EMAIL_PATTERN.test(userEmail)) {
     return fail(c, 400, "userEmail must be a valid email");
   }
-  if (inviterUserId) {
+  if (inviterLookupInput) {
     const referralCheck = await requireReferralTables(c);
     if (!referralCheck.ok) {
       return referralCheck.response;
@@ -1762,44 +2035,79 @@ app.post("/api/admin/users", async (c) => {
   const tokenHash = await sha256Hex(statusToken);
   const hasTokenVersionColumn = await hasUsersTokenVersionColumn(c.env.DB);
   const hasUsersProfileColumns = await hasUsersExtraProfileColumns(c.env.DB);
+  const hasInviteCodeColumn = await hasUsersInviteCodeColumn(c.env.DB);
+  let systemInviteCode = hasInviteCodeColumn
+    ? await generateUniqueSystemInviteCode(c.env.DB)
+    : null;
+  let resolvedInviterUserId: string | null = null;
+  if (inviterLookupInput) {
+    resolvedInviterUserId = await resolveInviterUserIdByCode(c.env.DB, inviterLookupInput);
+    if (!resolvedInviterUserId) {
+      return fail(c, 400, "inviter not found by invite code");
+    }
+  }
 
   if (!hasUsersProfileColumns && (systemEmail || familyGroupName || userEmail)) {
     return fail(c, 500, "database migration required: users profile columns missing");
   }
 
-  if (hasTokenVersionColumn && hasUsersProfileColumns) {
-    await c.env.DB.prepare(
-      `INSERT INTO users (
-        id,
-        username,
-        system_email,
-        family_group_name,
-        user_email,
-        access_token_hash,
-        token_version,
-        expire_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)`
-    )
-      .bind(userId, username, systemEmail ?? null, familyGroupName ?? null, userEmail ?? null, tokenHash, tokenVersion)
-      .run();
-  } else if (hasTokenVersionColumn) {
-    await c.env.DB.prepare(
-      "INSERT INTO users (id, username, access_token_hash, token_version, expire_at) VALUES (?, ?, ?, ?, 0)"
-    )
-      .bind(userId, username, tokenHash, tokenVersion)
-      .run();
-  } else {
-    await c.env.DB.prepare(
-      "INSERT INTO users (id, username, access_token_hash, expire_at) VALUES (?, ?, ?, 0)"
-    )
-      .bind(userId, username, tokenHash)
-      .run();
+  const baseInsertColumns = ["id", "username", "access_token_hash", "expire_at"];
+  const baseInsertValues: Array<string | number | null> = [
+    userId,
+    username,
+    tokenHash,
+    0
+  ];
+  if (hasUsersProfileColumns) {
+    baseInsertColumns.push("system_email", "family_group_name", "user_email");
+    baseInsertValues.push(systemEmail ?? null, familyGroupName ?? null, userEmail ?? null);
+  }
+  if (hasTokenVersionColumn) {
+    baseInsertColumns.push("token_version");
+    baseInsertValues.push(tokenVersion);
+  }
+
+  let insertError: unknown = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const insertColumns = [...baseInsertColumns];
+    const insertValues = [...baseInsertValues];
+    if (hasInviteCodeColumn) {
+      insertColumns.push("system_invite_code");
+      insertValues.push(systemInviteCode);
+    }
+
+    try {
+      await c.env.DB
+        .prepare(
+          `INSERT INTO users (${insertColumns.join(", ")})
+           VALUES (${insertColumns.map(() => "?").join(", ")})`
+        )
+        .bind(...insertValues)
+        .run();
+      insertError = null;
+      break;
+    } catch (error) {
+      insertError = error;
+      const message = error instanceof Error ? error.message : "";
+      if (
+        hasInviteCodeColumn &&
+        message.includes("UNIQUE constraint failed: users.system_invite_code")
+      ) {
+        systemInviteCode = await generateUniqueSystemInviteCode(c.env.DB);
+        continue;
+      }
+      break;
+    }
+  }
+  if (insertError) {
+    console.error("create user insert failed", insertError);
+    return fail(c, 500, "failed to create user");
   }
 
   const now = getCurrentTimestamp();
-  if (inviterUserId) {
+  if (resolvedInviterUserId) {
     const bindResult = await bindUserReferral(c.env.DB, {
-      inviterUserId,
+      inviterUserId: resolvedInviterUserId,
       inviteeUserId: userId,
       boundByAdminId: c.get("adminSession").adminId,
       now,
@@ -1818,12 +2126,14 @@ app.post("/api/admin/users", async (c) => {
       systemEmail: hasUsersProfileColumns ? systemEmail ?? null : null,
       familyGroupName: hasUsersProfileColumns ? familyGroupName ?? null : null,
       userEmail: hasUsersProfileColumns ? userEmail ?? null : null,
+      systemInviteCode,
+      customInviteCode: null,
       expireAt: 0,
       createdAt: now,
       updatedAt: now,
       tokenVersion,
       statusToken,
-      inviterUserId: inviterUserId ?? null
+      inviterUserId: resolvedInviterUserId
     }
   };
 
@@ -1840,27 +2150,81 @@ app.get("/api/admin/users", async (c) => {
   const escapedQuery = query.replaceAll("%", "\\%").replaceAll("_", "\\_");
   const hasTokenVersionColumn = await hasUsersTokenVersionColumn(c.env.DB);
   const hasUsersProfileColumns = await hasUsersExtraProfileColumns(c.env.DB);
+  const hasInviteCodeColumn = await hasUsersInviteCodeColumn(c.env.DB);
+  const hasAliasTable = await hasInviteAliasesTable(c.env.DB);
   const tokenVersionSelect = hasTokenVersionColumn
     ? "token_version"
     : `${DEFAULT_USER_TOKEN_VERSION} AS token_version`;
   const profileSelect = hasUsersProfileColumns
     ? "system_email, family_group_name, user_email"
     : "NULL AS system_email, NULL AS family_group_name, NULL AS user_email";
+  const systemInviteCodeSelect = hasInviteCodeColumn
+    ? "u.system_invite_code"
+    : "NULL AS system_invite_code";
+  const customInviteCodeSelect = hasAliasTable
+    ? `(SELECT ia.alias
+        FROM invite_aliases AS ia
+        WHERE ia.user_id = u.id AND ia.status = 'active'
+        ORDER BY ia.updated_at DESC, ia.id DESC
+        LIMIT 1) AS custom_invite_code`
+    : "NULL AS custom_invite_code";
 
   const rows = query
-    ? await c.env.DB.prepare(
-      `SELECT id, username, ${profileSelect}, expire_at, created_at, updated_at, ${tokenVersionSelect}, access_token_hash
-       FROM users
-       WHERE username LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\'
-       ORDER BY created_at DESC
-       LIMIT ?`
-    )
-      .bind(`%${escapedQuery}%`, `%${escapedQuery}%`, USER_LIST_LIMIT)
-      .all<UserRow>()
+    ? await (async () => {
+      const whereClauses = [
+        "u.username LIKE ? ESCAPE '\\'",
+        "u.id LIKE ? ESCAPE '\\'"
+      ];
+      const whereValues = [`%${escapedQuery}%`, `%${escapedQuery}%`];
+      if (hasInviteCodeColumn) {
+        whereClauses.push("u.system_invite_code LIKE ? ESCAPE '\\'");
+        whereValues.push(`%${escapedQuery}%`);
+      }
+      if (hasAliasTable) {
+        whereClauses.push(
+          `EXISTS (
+            SELECT 1
+            FROM invite_aliases AS ia
+            WHERE ia.user_id = u.id AND ia.status = 'active' AND ia.alias LIKE ? ESCAPE '\\'
+          )`
+        );
+        whereValues.push(`%${escapedQuery}%`);
+      }
+
+      return c.env.DB.prepare(
+        `SELECT
+          u.id,
+          u.username,
+          ${profileSelect},
+          ${systemInviteCodeSelect},
+          ${customInviteCodeSelect},
+          u.expire_at,
+          u.created_at,
+          u.updated_at,
+          ${tokenVersionSelect},
+          u.access_token_hash
+         FROM users AS u
+         WHERE ${whereClauses.join(" OR ")}
+         ORDER BY u.created_at DESC
+         LIMIT ?`
+      )
+        .bind(...whereValues, USER_LIST_LIMIT)
+        .all<UserRow>();
+    })()
     : await c.env.DB.prepare(
-      `SELECT id, username, ${profileSelect}, expire_at, created_at, updated_at, ${tokenVersionSelect}, access_token_hash
-       FROM users
-       ORDER BY created_at DESC
+      `SELECT
+        u.id,
+        u.username,
+        ${profileSelect},
+        ${systemInviteCodeSelect},
+        ${customInviteCodeSelect},
+        u.expire_at,
+        u.created_at,
+        u.updated_at,
+        ${tokenVersionSelect},
+        u.access_token_hash
+       FROM users AS u
+       ORDER BY u.created_at DESC
        LIMIT ?`
     )
       .bind(USER_LIST_LIMIT)
@@ -1990,9 +2354,21 @@ app.patch("/api/admin/users/:id", async (c) => {
   }
 
   const hasTokenVersionColumn = await hasUsersTokenVersionColumn(c.env.DB);
+  const hasInviteCodeColumn = await hasUsersInviteCodeColumn(c.env.DB);
+  const hasAliasTable = await hasInviteAliasesTable(c.env.DB);
   const tokenVersionSelect = hasTokenVersionColumn
     ? "token_version"
     : `${DEFAULT_USER_TOKEN_VERSION} AS token_version`;
+  const systemInviteCodeSelect = hasInviteCodeColumn
+    ? "system_invite_code"
+    : "NULL AS system_invite_code";
+  const customInviteCodeSelect = hasAliasTable
+    ? `(SELECT alias
+        FROM invite_aliases
+        WHERE user_id = users.id AND status = 'active'
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1) AS custom_invite_code`
+    : "NULL AS custom_invite_code";
   const user = await c.env.DB.prepare(
     `SELECT
       id,
@@ -2000,6 +2376,8 @@ app.patch("/api/admin/users/:id", async (c) => {
       system_email,
       family_group_name,
       user_email,
+      ${systemInviteCodeSelect},
+      ${customInviteCodeSelect},
       expire_at,
       created_at,
       updated_at,
@@ -2133,10 +2511,15 @@ app.post("/api/admin/users/:id/referral/bind", async (c) => {
   const body = await c.req
     .json<Partial<AdminBindUserReferralRequestDTO>>()
     .catch(() => null);
-  const inviterUserId =
-    typeof body?.inviterUserId === "string" ? body.inviterUserId.trim() : "";
+  const inviterCodeInput = normalizeInviteCode(body?.inviterCode);
+  const inviterUserIdInput = normalizeInviteCode(body?.inviterUserId);
+  const inviterLookupInput = inviterCodeInput ?? inviterUserIdInput;
+  if (!inviterLookupInput) {
+    return fail(c, 400, "inviterCode is required");
+  }
+  const inviterUserId = await resolveInviterUserIdByCode(c.env.DB, inviterLookupInput);
   if (!inviterUserId) {
-    return fail(c, 400, "inviterUserId is required");
+    return fail(c, 400, "inviter not found by invite code");
   }
 
   const bindResult = await bindUserReferral(c.env.DB, {
@@ -2158,6 +2541,102 @@ app.post("/api/admin/users/:id/referral/bind", async (c) => {
     inviteeUserId: bindResult.inviteeUserId,
     boundAt: bindResult.boundAt
   };
+  return ok(c, payload);
+});
+
+app.put("/api/admin/users/:id/invite-code", async (c) => {
+  const inviteCodeCheck = await requireInviteCodeSupport(c);
+  if (!inviteCodeCheck.ok) {
+    return inviteCodeCheck.response;
+  }
+
+  const tokenSecret = getUserTokenSecret(c.env);
+  if (!tokenSecret) {
+    return fail(c, 500, "user token secret is not configured");
+  }
+
+  const userId = c.req.param("id")?.trim();
+  if (!userId) {
+    return fail(c, 400, "user id is required");
+  }
+  const hasTokenVersionColumn = await hasUsersTokenVersionColumn(c.env.DB);
+  const tokenVersionSelect = hasTokenVersionColumn
+    ? "token_version"
+    : `${DEFAULT_USER_TOKEN_VERSION} AS token_version`;
+
+  const body = await c.req
+    .json<Partial<AdminUpdateUserInviteCodeRequestDTO>>()
+    .catch(() => null);
+  const customInviteCodeInput = normalizeInviteCode(body?.customInviteCode);
+  const now = getCurrentTimestamp();
+  const adminId = c.get("adminSession").adminId;
+
+  const userRow = await c.env.DB
+    .prepare(
+      `SELECT
+        id,
+        username,
+        system_email,
+        family_group_name,
+        user_email,
+        system_invite_code,
+        expire_at,
+        created_at,
+        updated_at,
+        ${tokenVersionSelect},
+        access_token_hash
+       FROM users
+       WHERE id = ?
+       LIMIT 1`
+    )
+    .bind(userId)
+    .first<UserRow>();
+  if (!userRow) {
+    return fail(c, 404, "user not found");
+  }
+
+  if (customInviteCodeInput) {
+    const upsertResult = await upsertUserCustomInviteAlias(c.env.DB, {
+      userId,
+      customInviteCode: customInviteCodeInput,
+      adminId,
+      now
+    });
+    if (!upsertResult.ok) {
+      return fail(c, upsertResult.status, upsertResult.message);
+    }
+  } else {
+    await c.env.DB
+      .prepare(
+        `UPDATE invite_aliases
+         SET status = 'disabled', updated_by_admin_id = ?, updated_at = ?
+         WHERE user_id = ? AND status = 'active'`
+      )
+      .bind(adminId, now, userId)
+      .run();
+  }
+
+  const activeAlias = await c.env.DB
+    .prepare(
+      `SELECT alias
+       FROM invite_aliases
+       WHERE user_id = ? AND status = 'active'
+       ORDER BY updated_at DESC, id DESC
+       LIMIT 1`
+    )
+    .bind(userId)
+    .first<{ alias: string }>();
+
+  const payload: AdminUpdateUserInviteCodeResponseDTO = {
+    user: await toAdminUserDTO(
+      {
+        ...userRow,
+        custom_invite_code: activeAlias?.alias ?? null
+      },
+      tokenSecret
+    )
+  };
+
   return ok(c, payload);
 });
 
