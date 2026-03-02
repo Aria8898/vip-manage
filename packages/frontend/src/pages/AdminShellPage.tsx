@@ -1822,7 +1822,7 @@ export const AdminShellPage = () => {
                   },
                 },
               ]}
-              extra="留空并保存可清空当前自定义口令，系统短码始终可用。"
+              extra="保存后旧口令立即失效。留空并保存可清空当前自定义口令，系统短码始终可用。"
             >
               <Input
                 allowClear
