@@ -33,6 +33,7 @@ import {
   Select,
   Space,
   Statistic,
+  Switch,
   Table,
   Tag,
   Tooltip,
@@ -70,13 +71,13 @@ interface BackfillFormValues {
   reason: RechargeReason;
   paymentAmount: number;
   occurredAtInput: string;
+  grantReferralReward?: boolean;
   internalNote?: string;
   externalNote?: string;
 }
 
 interface RefundFormValues {
   refundNote?: string;
-  refundAmount?: number;
 }
 
 interface UpdateUserFormValues {
@@ -669,6 +670,7 @@ export const AdminShellPage = () => {
       reason: RechargeReason.WECHAT_PAY,
       paymentAmount: 0,
       occurredAtInput: toLocalDateTimeInput(Math.floor(Date.now() / 1000)),
+      grantReferralReward: false,
       internalNote: "",
       externalNote: "",
     });
@@ -703,7 +705,6 @@ export const AdminShellPage = () => {
     setRefundModalOpen(true);
     refundForm.setFieldsValue({
       refundNote: "",
-      refundAmount: record.paymentAmount,
     });
   };
 
@@ -722,7 +723,7 @@ export const AdminShellPage = () => {
       );
       await Promise.all([loadUsers(activeQuery), loadReferralDashboard()]);
       messageApi.success(
-        `提现成功：${user.username}，金额 ${formatPaymentAmount(response.data.withdrawnAmount)}`,
+        `提现成功：${user.username}，到账 ${formatPaymentAmount(response.data.withdrawnAmount)}（毛额 ${formatPaymentAmount(response.data.grossAmount)}，抵扣 ${formatPaymentAmount(response.data.debtOffsetAmount)}）`,
       );
     } catch (error) {
       messageApi.error(
@@ -747,10 +748,6 @@ export const AdminShellPage = () => {
           method: "POST",
           body: JSON.stringify({
             refundNote: values.refundNote?.trim() || undefined,
-            refundAmount:
-              typeof values.refundAmount === "number"
-                ? values.refundAmount
-                : undefined,
           }),
         },
       );
@@ -875,6 +872,7 @@ export const AdminShellPage = () => {
             reason: values.reason,
             paymentAmount: values.paymentAmount,
             occurredAt,
+            grantReferralReward: values.grantReferralReward === true,
             internalNote: values.internalNote?.trim() || undefined,
             externalNote: values.externalNote?.trim() || undefined,
           }),
@@ -919,6 +917,7 @@ export const AdminShellPage = () => {
       dashboard.dayEndAt - 1,
     )}`;
   }, [dashboard, formatUnixSeconds]);
+  const withdrawThresholdAmount = referralDashboard?.withdrawThresholdAmount ?? 10;
 
   const userColumns = useMemo<ColumnsType<AdminUserDTO>>(
     () => [
@@ -1003,9 +1002,23 @@ export const AdminShellPage = () => {
         render: (value: number | undefined) => formatPaymentAmount(value ?? 0),
       },
       {
-        title: "可提现奖励",
-        dataIndex: "availableRewardAmount",
-        key: "availableRewardAmount",
+        title: "毛可提现奖励",
+        dataIndex: "grossAvailableRewardAmount",
+        key: "grossAvailableRewardAmount",
+        width: 130,
+        render: (value: number | undefined) => formatPaymentAmount(value ?? 0),
+      },
+      {
+        title: "奖励债务",
+        dataIndex: "rewardDebtAmount",
+        key: "rewardDebtAmount",
+        width: 120,
+        render: (value: number | undefined) => formatPaymentAmount(value ?? 0),
+      },
+      {
+        title: "净可提现",
+        dataIndex: "netWithdrawableAmount",
+        key: "netWithdrawableAmount",
         width: 130,
         render: (value: number | undefined) => formatPaymentAmount(value ?? 0),
       },
@@ -1038,97 +1051,103 @@ export const AdminShellPage = () => {
         key: "actions",
         fixed: "right",
         width: 340,
-        render: (_, user) => (
-          <Space size={6}>
-            <Tooltip title={copiedUserId === user.id ? "已复制" : "复制链接"}>
-              <Button
-                type={copiedUserId === user.id ? "default" : "primary"}
-                shape="circle"
-                onClick={() => handleCopyLink(user)}
-                aria-label={copiedUserId === user.id ? "已复制" : "复制链接"}
-              >
-                {copiedUserId === user.id ? "✓" : "⧉"}
-              </Button>
-            </Tooltip>
-            <Tooltip title="直接跳转">
-              <Button
-                shape="circle"
-                onClick={() => handleOpenLink(user)}
-                aria-label="直接跳转"
-              >
-                ↗
-              </Button>
-            </Tooltip>
-            <Tooltip title="编辑资料">
-              <Button
-                shape="circle"
-                onClick={() => handleOpenUpdateModal(user)}
-                aria-label="编辑资料"
-              >
-                ✎
-              </Button>
-            </Tooltip>
-            <Tooltip title="充值">
-              <Button
-                shape="circle"
-                onClick={() => handleOpenRechargeModal(user)}
-                aria-label="充值"
-              >
-                +
-              </Button>
-            </Tooltip>
-            <Tooltip title="历史补录">
-              <Button
-                shape="circle"
-                onClick={() => handleOpenBackfillModal(user)}
-                aria-label="历史补录"
-              >
-                ⏱
-              </Button>
-            </Tooltip>
-            <Popconfirm
-              title="提现可提现奖励"
-              description={`确认给 ${user.username} 提现 ${formatPaymentAmount(user.availableRewardAmount ?? 0)} 吗？`}
-              okText="确认提现"
-              cancelText="取消"
-              onConfirm={() => {
-                void handleWithdrawRewards(user);
-              }}
-              disabled={(user.availableRewardAmount ?? 0) <= 0}
-            >
-              <Tooltip title="提现">
+        render: (_, user) => {
+          const netWithdrawableAmount =
+            user.netWithdrawableAmount ?? user.availableRewardAmount ?? 0;
+          const canWithdraw = netWithdrawableAmount >= withdrawThresholdAmount;
+
+          return (
+            <Space size={6}>
+              <Tooltip title={copiedUserId === user.id ? "已复制" : "复制链接"}>
                 <Button
+                  type={copiedUserId === user.id ? "default" : "primary"}
                   shape="circle"
-                  loading={withdrawingUserId === user.id}
-                  disabled={(user.availableRewardAmount ?? 0) <= 0}
-                  aria-label="提现"
+                  onClick={() => handleCopyLink(user)}
+                  aria-label={copiedUserId === user.id ? "已复制" : "复制链接"}
                 >
-                  ¥
+                  {copiedUserId === user.id ? "✓" : "⧉"}
                 </Button>
               </Tooltip>
-            </Popconfirm>
-            <Popconfirm
-              title="重置 Token"
-              description="旧链接会立即失效，确认继续？"
-              okText="确认重置"
-              cancelText="取消"
-              onConfirm={() => {
-                void handleResetToken(user);
-              }}
-            >
-              <Tooltip title="重置 Token">
+              <Tooltip title="直接跳转">
                 <Button
-                  danger
                   shape="circle"
-                  loading={resettingTokenUserId === user.id}
-                  aria-label="重置 Token"
+                  onClick={() => handleOpenLink(user)}
+                  aria-label="直接跳转"
                 >
-                  ⟲
+                  ↗
                 </Button>
               </Tooltip>
-            </Popconfirm>
-          </Space>
-        ),
+              <Tooltip title="编辑资料">
+                <Button
+                  shape="circle"
+                  onClick={() => handleOpenUpdateModal(user)}
+                  aria-label="编辑资料"
+                >
+                  ✎
+                </Button>
+              </Tooltip>
+              <Tooltip title="充值">
+                <Button
+                  shape="circle"
+                  onClick={() => handleOpenRechargeModal(user)}
+                  aria-label="充值"
+                >
+                  +
+                </Button>
+              </Tooltip>
+              <Tooltip title="历史补录">
+                <Button
+                  shape="circle"
+                  onClick={() => handleOpenBackfillModal(user)}
+                  aria-label="历史补录"
+                >
+                  ⏱
+                </Button>
+              </Tooltip>
+              <Popconfirm
+                title="提现可提现奖励"
+                description={`确认给 ${user.username} 提现 ${formatPaymentAmount(netWithdrawableAmount)} 吗？（门槛 ${formatPaymentAmount(withdrawThresholdAmount)}）`}
+                okText="确认提现"
+                cancelText="取消"
+                onConfirm={() => {
+                  void handleWithdrawRewards(user);
+                }}
+                disabled={!canWithdraw}
+              >
+                <Tooltip title="提现">
+                  <Button
+                    shape="circle"
+                    loading={withdrawingUserId === user.id}
+                    disabled={!canWithdraw}
+                    aria-label="提现"
+                  >
+                    ¥
+                  </Button>
+                </Tooltip>
+              </Popconfirm>
+              <Popconfirm
+                title="重置 Token"
+                description="旧链接会立即失效，确认继续？"
+                okText="确认重置"
+                cancelText="取消"
+                onConfirm={() => {
+                  void handleResetToken(user);
+                }}
+              >
+                <Tooltip title="重置 Token">
+                  <Button
+                    danger
+                    shape="circle"
+                    loading={resettingTokenUserId === user.id}
+                    aria-label="重置 Token"
+                  >
+                    ⟲
+                  </Button>
+                </Tooltip>
+              </Popconfirm>
+            </Space>
+          );
+        },
       },
     ],
     [
@@ -1142,6 +1161,7 @@ export const AdminShellPage = () => {
       handleResetToken,
       handleWithdrawRewards,
       withdrawingUserId,
+      withdrawThresholdAmount,
       formatPaymentAmount,
       resettingTokenUserId,
     ],
@@ -1450,6 +1470,24 @@ export const AdminShellPage = () => {
           </Col>
           <Col xs={24} sm={12} md={8}>
             <Statistic
+              title="毛可提现总额"
+              value={referralDashboard?.grossAvailableAmount || 0}
+              loading={loadingReferralDashboard}
+              precision={2}
+              prefix="¥"
+            />
+          </Col>
+          <Col xs={24} sm={12} md={8}>
+            <Statistic
+              title="奖励债务总额"
+              value={referralDashboard?.debtAmount || 0}
+              loading={loadingReferralDashboard}
+              precision={2}
+              prefix="¥"
+            />
+          </Col>
+          <Col xs={24} sm={12} md={8}>
+            <Statistic
               title="已提现总额"
               value={referralDashboard?.withdrawnAmount || 0}
               loading={loadingReferralDashboard}
@@ -1458,6 +1496,12 @@ export const AdminShellPage = () => {
             />
           </Col>
         </Row>
+        <Typography.Paragraph
+          type="secondary"
+          style={{ marginBottom: 0, marginTop: 12 }}
+        >
+          提现门槛：净可提现金额满 {formatPaymentAmount(withdrawThresholdAmount)} 才可发起提现。
+        </Typography.Paragraph>
       </Card>
 
       <Card className="admin-table-card" bordered={false}>
@@ -1484,7 +1528,7 @@ export const AdminShellPage = () => {
             pageSize: 20,
             showSizeChanger: false,
           }}
-          scroll={{ x: 2200 }}
+          scroll={{ x: 2500 }}
         />
       </Card>
 
@@ -2098,6 +2142,17 @@ export const AdminShellPage = () => {
                 placeholder="例如：99.00"
               />
             </Form.Item>
+            <Form.Item
+              label="邀请奖励"
+              name="grantReferralReward"
+              valuePropName="checked"
+              tooltip="默认关闭。开启后，本次补录会按邀请规则给邀请人生成预计奖励。"
+            >
+              <Switch checkedChildren="计入" unCheckedChildren="不计入" />
+            </Form.Item>
+            <Typography.Text type="secondary">
+              审计说明：系统会在内部备注自动追加本次“是否计入邀请奖励”的标记。
+            </Typography.Text>
             <Form.Item label="内部备注（仅管理员可见）" name="internalNote">
               <Input.TextArea
                 maxLength={MAX_INTERNAL_NOTE_LENGTH}
@@ -2146,44 +2201,9 @@ export const AdminShellPage = () => {
           </Card>
 
           <Form<RefundFormValues> layout="vertical" form={refundForm}>
-            <Form.Item
-              label="退款金额（元）"
-              name="refundAmount"
-              rules={[
-                {
-                  required: true,
-                  message: "请输入退款金额",
-                },
-                {
-                  validator: (_, value: number | undefined) => {
-                    if (typeof value !== "number") {
-                      return Promise.resolve();
-                    }
-
-                    if (value < 0) {
-                      return Promise.reject(new Error("退款金额不能小于 0"));
-                    }
-
-                    const maxAmount = refundTargetRecord?.paymentAmount ?? 0;
-                    if (value > maxAmount) {
-                      return Promise.reject(
-                        new Error(`退款金额不能超过 ${maxAmount.toFixed(2)} 元`),
-                      );
-                    }
-
-                    return Promise.resolve();
-                  },
-                },
-              ]}
-            >
-              <InputNumber
-                min={0}
-                precision={2}
-                step={0.01}
-                style={{ width: "100%" }}
-                placeholder="默认等于充值金额"
-              />
-            </Form.Item>
+            <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
+              系统会按“已使用天数 + 剩余天数”自动计算退款金额，并仅回滚剩余天数。
+            </Typography.Paragraph>
             <Form.Item
               label="退款备注"
               name="refundNote"

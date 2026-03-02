@@ -170,11 +170,19 @@ interface RechargeRecordForRefundRow {
   source: string | null;
   change_days: number;
   payment_amount_cents: number | null;
+  expire_before: number;
+  expire_after: number;
   refunded_at: number | null;
 }
 
 interface RechargeRefundTargetWithUserRow extends RechargeRecordForRefundRow {
   username: string;
+}
+
+interface RefundUsageSnapshot {
+  usedDays: number;
+  refundableDays: number;
+  refundableAmountCents: number;
 }
 
 interface UserProfileChangeLogRow {
@@ -214,9 +222,15 @@ interface ReferralRewardLedgerRow {
   payment_amount_cents: number;
   reward_rate_bps: number;
   reward_amount_cents: number;
+  unlock_start_at: number;
+  total_days: number;
+  unlocked_days: number;
+  unlocked_amount_cents: number;
+  withdrawn_amount_cents: number;
   status: string;
   unlock_at: number;
   available_at: number | null;
+  fully_unlocked_at: number | null;
   canceled_at: number | null;
   canceled_reason: string | null;
   withdrawn_at: number | null;
@@ -230,6 +244,8 @@ interface ReferralWithdrawalRow {
   inviter_user_id: string;
   inviter_username: string;
   amount_cents: number;
+  gross_amount_cents: number;
+  debt_offset_cents: number;
   processed_by_admin_id: string;
   processed_by_admin_username: string;
   note: string | null;
@@ -242,8 +258,9 @@ interface UserTotalChangeDaysRow {
 
 interface UserReferralSummaryRow {
   pending_amount_cents: number | string | null;
-  available_amount_cents: number | string | null;
+  gross_available_amount_cents: number | string | null;
   withdrawn_amount_cents: number | string | null;
+  reward_debt_cents: number | string | null;
 }
 
 interface UserInviteeCountRow {
@@ -256,7 +273,7 @@ interface UserInviteeRewardSummaryRow {
   pending_amount_cents: number | string | null;
   available_amount_cents: number | string | null;
   withdrawn_amount_cents: number | string | null;
-  total_amount_cents: number | string | null;
+  reward_amount_cents: number | string | null;
 }
 
 interface RechargeRebuildRow {
@@ -305,6 +322,7 @@ let cachedHasRechargeTimelineColumns: boolean | null = null;
 let cachedHasRechargeExternalNoteColumn: boolean | null = null;
 let cachedHasRechargeRefundColumns: boolean | null = null;
 let cachedHasReferralTables: boolean | null = null;
+let cachedHasReferralDailyUnlockColumns: boolean | null = null;
 
 const getCurrentTimestamp = (): number => Math.floor(Date.now() / 1000);
 
@@ -621,6 +639,45 @@ const hasReferralTables = async (db: D1Database): Promise<boolean> => {
   return cachedHasReferralTables;
 };
 
+const hasReferralDailyUnlockColumns = async (db: D1Database): Promise<boolean> => {
+  if (cachedHasReferralDailyUnlockColumns !== null) {
+    return cachedHasReferralDailyUnlockColumns;
+  }
+
+  const userRows = await db.prepare("PRAGMA table_info(users)").all<SqliteTableInfoRow>();
+  const userColumns = new Set((userRows.results || []).map((row) => row.name));
+  if (!userColumns.has("referral_reward_debt_cents")) {
+    cachedHasReferralDailyUnlockColumns = false;
+    return false;
+  }
+
+  const rewardRows = await db
+    .prepare("PRAGMA table_info(referral_reward_ledger)")
+    .all<SqliteTableInfoRow>();
+  const rewardColumns = new Set((rewardRows.results || []).map((row) => row.name));
+  const hasRewardColumns =
+    rewardColumns.has("unlock_start_at") &&
+    rewardColumns.has("total_days") &&
+    rewardColumns.has("unlocked_days") &&
+    rewardColumns.has("unlocked_amount_cents") &&
+    rewardColumns.has("withdrawn_amount_cents") &&
+    rewardColumns.has("fully_unlocked_at");
+  if (!hasRewardColumns) {
+    cachedHasReferralDailyUnlockColumns = false;
+    return false;
+  }
+
+  const withdrawalRows = await db
+    .prepare("PRAGMA table_info(referral_withdrawals)")
+    .all<SqliteTableInfoRow>();
+  const withdrawalColumns = new Set((withdrawalRows.results || []).map((row) => row.name));
+  const hasWithdrawalColumns =
+    withdrawalColumns.has("gross_amount_cents") &&
+    withdrawalColumns.has("debt_offset_cents");
+  cachedHasReferralDailyUnlockColumns = hasWithdrawalColumns;
+  return hasWithdrawalColumns;
+};
+
 const normalizeInternalNote = (value: unknown): string | null => {
   if (typeof value !== "string") {
     return null;
@@ -673,6 +730,23 @@ const normalizeWithdrawNote = (value: unknown): string | null => {
   return trimmed;
 };
 
+const buildBackfillAuditInternalNote = (
+  internalNote: string | null,
+  grantReferralReward: boolean
+): string => {
+  const marker = grantReferralReward
+    ? "[backfill_referral_reward=enabled]"
+    : "[backfill_referral_reward=disabled]";
+  if (!internalNote) {
+    return marker;
+  }
+  if (internalNote.includes(marker)) {
+    return internalNote;
+  }
+
+  return `${internalNote}\n${marker}`;
+};
+
 const normalizePaymentAmount = (value: unknown): number | null => {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return null;
@@ -686,6 +760,56 @@ const toPaymentAmountCents = (value: number): number => Math.round(value * 100);
 const toPaymentAmount = (value: number | null | undefined): number => {
   const cents = typeof value === "number" && Number.isFinite(value) ? value : 0;
   return Number((Math.max(cents, 0) / 100).toFixed(2));
+};
+
+const toNonNegativeInt = (
+  value: number | string | null | undefined
+): number => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(Math.floor(value), 0);
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return Math.max(Math.floor(parsed), 0);
+    }
+  }
+  return 0;
+};
+
+const calculateRefundUsageSnapshot = (
+  record: {
+    change_days: number;
+    payment_amount_cents: number | null;
+    expire_before: number;
+    expire_after: number;
+  },
+  now: number
+): RefundUsageSnapshot => {
+  const totalDays = toNonNegativeInt(record.change_days);
+  if (totalDays <= 0) {
+    return {
+      usedDays: 0,
+      refundableDays: 0,
+      refundableAmountCents: 0
+    };
+  }
+
+  const startAt = toNonNegativeInt(record.expire_before);
+  const endAt = Math.max(toNonNegativeInt(record.expire_after), startAt);
+  const elapsedSeconds = Math.max(Math.min(now, endAt) - startAt, 0);
+  const usedDays = Math.min(totalDays, Math.floor(elapsedSeconds / SECONDS_PER_DAY));
+  const refundableDays = Math.max(totalDays - usedDays, 0);
+  const paymentAmountCents = toNonNegativeInt(record.payment_amount_cents);
+  const refundableAmountCents = Math.floor(
+    (paymentAmountCents * refundableDays) / totalDays
+  );
+
+  return {
+    usedDays,
+    refundableDays,
+    refundableAmountCents
+  };
 };
 
 const isUserProfileChangeField = (value: string): value is UserProfileChangeField => {
@@ -774,28 +898,43 @@ const toAdminRechargeRecordDTO = (row: RechargeRecordRow): AdminRechargeRecordDT
 
 const toAdminReferralRewardRecordDTO = (
   row: ReferralRewardLedgerRow
-): AdminReferralRewardRecordDTO => ({
-  id: row.id,
-  inviterUserId: row.inviter_user_id,
-  inviterUsername: row.inviter_username,
-  inviteeUserId: row.invitee_user_id,
-  inviteeUsername: row.invitee_username,
-  rechargeRecordId: row.recharge_record_id,
-  rechargeReason: toRechargeReason(row.recharge_reason),
-  rechargeSource: toRechargeRecordSource(row.recharge_source),
-  paymentAmount: toPaymentAmount(row.payment_amount_cents),
-  rewardRateBps: row.reward_rate_bps,
-  rewardAmount: toPaymentAmount(row.reward_amount_cents),
-  status: toReferralRewardStatus(row.status),
-  unlockAt: row.unlock_at,
-  availableAt: row.available_at ?? null,
-  canceledAt: row.canceled_at ?? null,
-  canceledReason: row.canceled_reason ?? null,
-  withdrawnAt: row.withdrawn_at ?? null,
-  withdrawalId: row.withdrawal_id ?? null,
-  createdAt: row.created_at,
-  updatedAt: row.updated_at
-});
+): AdminReferralRewardRecordDTO => {
+  const rewardAmountCents = toNonNegativeInt(row.reward_amount_cents);
+  const unlockedAmountCents = Math.min(
+    rewardAmountCents,
+    toNonNegativeInt(row.unlocked_amount_cents)
+  );
+  const withdrawnAmountCents = toNonNegativeInt(row.withdrawn_amount_cents);
+  const withdrawableAmountCents = Math.max(unlockedAmountCents - withdrawnAmountCents, 0);
+
+  return {
+    id: row.id,
+    inviterUserId: row.inviter_user_id,
+    inviterUsername: row.inviter_username,
+    inviteeUserId: row.invitee_user_id,
+    inviteeUsername: row.invitee_username,
+    rechargeRecordId: row.recharge_record_id,
+    rechargeReason: toRechargeReason(row.recharge_reason),
+    rechargeSource: toRechargeRecordSource(row.recharge_source),
+    paymentAmount: toPaymentAmount(row.payment_amount_cents),
+    rewardRateBps: row.reward_rate_bps,
+    rewardAmount: toPaymentAmount(rewardAmountCents),
+    unlockedRewardAmount: toPaymentAmount(unlockedAmountCents),
+    withdrawableRewardAmount: toPaymentAmount(withdrawableAmountCents),
+    withdrawnRewardAmount: toPaymentAmount(withdrawnAmountCents),
+    totalDays: toNonNegativeInt(row.total_days),
+    unlockedDays: toNonNegativeInt(row.unlocked_days),
+    status: toReferralRewardStatus(row.status),
+    unlockAt: row.unlock_at,
+    availableAt: row.available_at ?? null,
+    canceledAt: row.canceled_at ?? null,
+    canceledReason: row.canceled_reason ?? null,
+    withdrawnAt: row.withdrawn_at ?? null,
+    withdrawalId: row.withdrawal_id ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+};
 
 const toAdminReferralWithdrawalDTO = (
   row: ReferralWithdrawalRow
@@ -804,6 +943,8 @@ const toAdminReferralWithdrawalDTO = (
   inviterUserId: row.inviter_user_id,
   inviterUsername: row.inviter_username,
   amount: toPaymentAmount(row.amount_cents),
+  grossAmount: toPaymentAmount(row.gross_amount_cents),
+  debtOffsetAmount: toPaymentAmount(row.debt_offset_cents),
   processedByAdminId: row.processed_by_admin_id,
   processedByAdminUsername: row.processed_by_admin_username,
   note: row.note,
@@ -902,6 +1043,14 @@ const requireReferralTables = async (
     return {
       ok: false,
       response: fail(c, 500, "database migration required: referral tables missing")
+    };
+  }
+
+  const hasDailyUnlockColumns = await hasReferralDailyUnlockColumns(c.env.DB);
+  if (!hasDailyUnlockColumns) {
+    return {
+      ok: false,
+      response: fail(c, 500, "database migration required: referral daily unlock columns missing")
     };
   }
 
@@ -1101,20 +1250,34 @@ const applyReferralEffectsForRecharge = async (
     userId: string;
     recharge: AdminRechargeUserResponseDTO;
     occurredAt: number;
+    allowBackfillReward?: boolean;
   }
 ): Promise<void> => {
+  const isBackfillRecharge = params.recharge.record.source === RechargeRecordSource.BACKFILL;
+  const useRetroactiveBackfillUnlock =
+    isBackfillRecharge && params.allowBackfillReward === true;
+  const unlockStartAt = useRetroactiveBackfillUnlock
+    ? params.recharge.record.occurredAt
+    : params.recharge.record.expireBefore;
+
   const rewardResult = await createReferralRewardForRecharge(c.env.DB, {
     inviteeUserId: params.userId,
     rechargeRecordId: params.recharge.record.id,
     rechargeReason: params.recharge.record.reason,
     rechargeSource: params.recharge.record.source,
     paymentAmountCents: toPaymentAmountCents(params.recharge.record.paymentAmount),
-    unlockAt: params.recharge.record.expireAfter,
+    totalDays: Math.max(params.recharge.record.changeDays, 1),
+    unlockStartAt,
+    allowBackfillReward: params.allowBackfillReward,
     now: params.occurredAt
   });
 
   if (!rewardResult.created) {
     return;
+  }
+
+  if (useRetroactiveBackfillUnlock) {
+    await unlockPendingReferralRewards(c.env.DB, params.occurredAt);
   }
 
   const reservedBonus = await reserveInviteeBonusGrant(c.env.DB, {
@@ -1301,7 +1464,13 @@ app.get("/api/status/:token", async (c) => {
       .bind(user.id, DEFAULT_STATUS_HISTORY_LIMIT)
       .all<UserStatusHistoryRow>();
 
-  const referralEnabled = await hasReferralTables(c.env.DB);
+  const now = getCurrentTimestamp();
+  const referralEnabled =
+    (await hasReferralTables(c.env.DB)) &&
+    (await hasReferralDailyUnlockColumns(c.env.DB));
+  if (referralEnabled) {
+    await unlockPendingReferralRewards(c.env.DB, now);
+  }
   const inviteeCountRow = referralEnabled
     ? await c.env.DB.prepare(
       `SELECT COUNT(*) AS invitee_count
@@ -1314,13 +1483,49 @@ app.get("/api/status/:token", async (c) => {
   const referralSummaryRow = referralEnabled
     ? await c.env.DB.prepare(
       `SELECT
-        COALESCE(SUM(CASE WHEN status = '${ReferralRewardStatus.PENDING}' THEN reward_amount_cents ELSE 0 END), 0) AS pending_amount_cents,
-        COALESCE(SUM(CASE WHEN status = '${ReferralRewardStatus.AVAILABLE}' THEN reward_amount_cents ELSE 0 END), 0) AS available_amount_cents,
-        COALESCE(SUM(CASE WHEN status = '${ReferralRewardStatus.WITHDRAWN}' THEN reward_amount_cents ELSE 0 END), 0) AS withdrawn_amount_cents
+        COALESCE(SUM(
+          CASE
+            WHEN status = '${ReferralRewardStatus.CANCELED}' OR reward_amount_cents <= 0 THEN 0
+            ELSE reward_amount_cents -
+              (CASE
+                WHEN unlocked_amount_cents < reward_amount_cents THEN unlocked_amount_cents
+                ELSE reward_amount_cents
+              END)
+          END
+        ), 0) AS pending_amount_cents,
+        COALESCE(SUM(
+          CASE
+            WHEN status = '${ReferralRewardStatus.CANCELED}' OR reward_amount_cents <= 0 THEN 0
+            ELSE
+              CASE
+                WHEN
+                  (CASE
+                    WHEN unlocked_amount_cents < reward_amount_cents THEN unlocked_amount_cents
+                    ELSE reward_amount_cents
+                  END) > withdrawn_amount_cents
+                THEN
+                  (CASE
+                    WHEN unlocked_amount_cents < reward_amount_cents THEN unlocked_amount_cents
+                    ELSE reward_amount_cents
+                  END) - withdrawn_amount_cents
+                ELSE 0
+              END
+          END
+        ), 0) AS gross_available_amount_cents,
+        COALESCE(SUM(CASE WHEN withdrawn_amount_cents > 0 THEN withdrawn_amount_cents ELSE 0 END), 0) AS withdrawn_amount_cents,
+        COALESCE(
+          (
+            SELECT referral_reward_debt_cents
+            FROM users
+            WHERE id = ?
+            LIMIT 1
+          ),
+          0
+        ) AS reward_debt_cents
        FROM referral_reward_ledger
        WHERE inviter_user_id = ?`
     )
-      .bind(user.id)
+      .bind(user.id, user.id)
       .first<UserReferralSummaryRow>()
     : null;
   const inviteeRewardRows = referralEnabled
@@ -1328,28 +1533,66 @@ app.get("/api/status/:token", async (c) => {
       `SELECT
         l.invitee_user_id,
         u.username AS invitee_username,
-        COALESCE(SUM(CASE WHEN l.status = '${ReferralRewardStatus.PENDING}' THEN l.reward_amount_cents ELSE 0 END), 0) AS pending_amount_cents,
-        COALESCE(SUM(CASE WHEN l.status = '${ReferralRewardStatus.AVAILABLE}' THEN l.reward_amount_cents ELSE 0 END), 0) AS available_amount_cents,
-        COALESCE(SUM(CASE WHEN l.status = '${ReferralRewardStatus.WITHDRAWN}' THEN l.reward_amount_cents ELSE 0 END), 0) AS withdrawn_amount_cents,
-        COALESCE(SUM(CASE WHEN l.status != '${ReferralRewardStatus.CANCELED}' THEN l.reward_amount_cents ELSE 0 END), 0) AS total_amount_cents
+        COALESCE(SUM(
+          CASE
+            WHEN l.status = '${ReferralRewardStatus.CANCELED}' OR l.reward_amount_cents <= 0 THEN 0
+            ELSE l.reward_amount_cents -
+              (CASE
+                WHEN l.unlocked_amount_cents < l.reward_amount_cents THEN l.unlocked_amount_cents
+                ELSE l.reward_amount_cents
+              END)
+          END
+        ), 0) AS pending_amount_cents,
+        COALESCE(SUM(
+          CASE
+            WHEN l.status = '${ReferralRewardStatus.CANCELED}' OR l.reward_amount_cents <= 0 THEN 0
+            ELSE
+              CASE
+                WHEN
+                  (CASE
+                    WHEN l.unlocked_amount_cents < l.reward_amount_cents THEN l.unlocked_amount_cents
+                    ELSE l.reward_amount_cents
+                  END) > l.withdrawn_amount_cents
+                THEN
+                  (CASE
+                    WHEN l.unlocked_amount_cents < l.reward_amount_cents THEN l.unlocked_amount_cents
+                    ELSE l.reward_amount_cents
+                  END) - l.withdrawn_amount_cents
+                ELSE 0
+              END
+          END
+        ), 0) AS available_amount_cents,
+        COALESCE(SUM(CASE WHEN l.withdrawn_amount_cents > 0 THEN l.withdrawn_amount_cents ELSE 0 END), 0) AS withdrawn_amount_cents,
+        COALESCE(SUM(CASE WHEN l.status != '${ReferralRewardStatus.CANCELED}' AND l.reward_amount_cents > 0 THEN l.reward_amount_cents ELSE 0 END), 0) AS reward_amount_cents
        FROM referral_reward_ledger AS l
        INNER JOIN users AS u ON u.id = l.invitee_user_id
        WHERE l.inviter_user_id = ?
        GROUP BY l.invitee_user_id, u.username
-       ORDER BY total_amount_cents DESC, l.invitee_user_id ASC
+       ORDER BY reward_amount_cents DESC, l.invitee_user_id ASC
        LIMIT 50`
     )
       .bind(user.id)
       .all<UserInviteeRewardSummaryRow>()
     : { results: [] };
 
-  const now = getCurrentTimestamp();
   const remainingDays =
     user.expire_at > now
       ? Math.ceil((user.expire_at - now) / SECONDS_PER_DAY)
       : 0;
   const totalChangeDays = Number(totalChangeDaysRow?.total_change_days || 0);
   const usedDays = Math.max(totalChangeDays - remainingDays, 0);
+  const pendingRewardAmountCents = toNonNegativeInt(referralSummaryRow?.pending_amount_cents);
+  const grossAvailableAmountCents = toNonNegativeInt(
+    referralSummaryRow?.gross_available_amount_cents
+  );
+  const withdrawnRewardAmountCents = toNonNegativeInt(
+    referralSummaryRow?.withdrawn_amount_cents
+  );
+  const rewardDebtCents = toNonNegativeInt(referralSummaryRow?.reward_debt_cents);
+  const netWithdrawableAmountCents = Math.max(
+    grossAvailableAmountCents - rewardDebtCents,
+    0
+  );
   const payload: UserStatusResponseDTO = {
     user: {
       id: user.id,
@@ -1368,21 +1611,21 @@ app.get("/api/status/:token", async (c) => {
     ),
     referral: {
       inviteeCount: Number(inviteeCountRow?.invitee_count || 0),
-      pendingRewardAmount: toPaymentAmount(Number(referralSummaryRow?.pending_amount_cents || 0)),
-      availableRewardAmount: toPaymentAmount(Number(referralSummaryRow?.available_amount_cents || 0)),
-      withdrawnRewardAmount: toPaymentAmount(Number(referralSummaryRow?.withdrawn_amount_cents || 0)),
+      pendingRewardAmount: toPaymentAmount(pendingRewardAmountCents),
+      availableRewardAmount: toPaymentAmount(netWithdrawableAmountCents),
+      withdrawnRewardAmount: toPaymentAmount(withdrawnRewardAmountCents),
       totalRewardAmount: toPaymentAmount(
-        Number(referralSummaryRow?.pending_amount_cents || 0) +
-        Number(referralSummaryRow?.available_amount_cents || 0) +
-        Number(referralSummaryRow?.withdrawn_amount_cents || 0)
+        pendingRewardAmountCents + grossAvailableAmountCents + withdrawnRewardAmountCents
       ),
+      rewardDebtAmount: toPaymentAmount(rewardDebtCents),
+      netWithdrawableAmount: toPaymentAmount(netWithdrawableAmountCents),
       invitees: (inviteeRewardRows.results || []).map((row) => ({
         inviteeUserId: row.invitee_user_id,
         inviteeUsername: row.invitee_username,
-        pendingRewardAmount: toPaymentAmount(Number(row.pending_amount_cents || 0)),
-        availableRewardAmount: toPaymentAmount(Number(row.available_amount_cents || 0)),
-        withdrawnRewardAmount: toPaymentAmount(Number(row.withdrawn_amount_cents || 0)),
-        totalRewardAmount: toPaymentAmount(Number(row.total_amount_cents || 0))
+        pendingRewardAmount: toPaymentAmount(toNonNegativeInt(row.pending_amount_cents)),
+        availableRewardAmount: toPaymentAmount(toNonNegativeInt(row.available_amount_cents)),
+        withdrawnRewardAmount: toPaymentAmount(toNonNegativeInt(row.withdrawn_amount_cents)),
+        totalRewardAmount: toPaymentAmount(toNonNegativeInt(row.reward_amount_cents))
       }))
     },
     now
@@ -1624,8 +1867,12 @@ app.get("/api/admin/users", async (c) => {
       .all<UserRow>();
 
   let users = await Promise.all((rows.results || []).map((row) => toAdminUserDTO(row, tokenSecret)));
-  const hasReferral = await hasReferralTables(c.env.DB);
+  const hasReferralBase = await hasReferralTables(c.env.DB);
+  const hasReferral = hasReferralBase
+    ? await hasReferralDailyUnlockColumns(c.env.DB)
+    : false;
   if (hasReferral && users.length > 0) {
+    await unlockPendingReferralRewards(c.env.DB, getCurrentTimestamp());
     const userIds = users.map((user) => user.id);
     const placeholders = userIds.map(() => "?").join(", ");
     const referralRows = await c.env.DB
@@ -1656,7 +1903,12 @@ app.get("/api/admin/users", async (c) => {
         inviterUsername: inviter?.inviter_username ?? null,
         inviteeCount: inviteeCountMap.get(user.id) ?? 0,
         pendingRewardAmount: toPaymentAmount(rewardSummary?.pendingAmountCents || 0),
-        availableRewardAmount: toPaymentAmount(rewardSummary?.availableAmountCents || 0)
+        availableRewardAmount: toPaymentAmount(rewardSummary?.availableAmountCents || 0),
+        rewardDebtAmount: toPaymentAmount(rewardSummary?.rewardDebtCents || 0),
+        grossAvailableRewardAmount: toPaymentAmount(
+          rewardSummary?.grossAvailableAmountCents || 0
+        ),
+        netWithdrawableAmount: toPaymentAmount(rewardSummary?.availableAmountCents || 0)
       };
     });
   }
@@ -2017,8 +2269,10 @@ app.post("/api/admin/users/:id/recharge/backfill", async (c) => {
   const paymentAmount = normalizePaymentAmount(body?.paymentAmount);
   const occurredAt = Number(body?.occurredAt);
   const internalNote = normalizeInternalNote(body?.internalNote);
+  const grantReferralReward = body?.grantReferralReward === true;
   const externalNote = normalizeInternalNote(body?.externalNote);
   const now = getCurrentTimestamp();
+  const auditedInternalNote = buildBackfillAuditInternalNote(internalNote, grantReferralReward);
 
   if (!Number.isInteger(days) || days <= 0 || days > MAX_RECHARGE_DAYS) {
     return fail(c, 400, `days must be an integer between 1 and ${MAX_RECHARGE_DAYS}`);
@@ -2035,7 +2289,7 @@ app.post("/api/admin/users/:id/recharge/backfill", async (c) => {
   if (occurredAt > now) {
     return fail(c, 400, "occurredAt cannot be in the future");
   }
-  if (internalNote && internalNote.length > MAX_INTERNAL_NOTE_LENGTH) {
+  if (auditedInternalNote.length > MAX_INTERNAL_NOTE_LENGTH) {
     return fail(c, 400, `internalNote must be <= ${MAX_INTERNAL_NOTE_LENGTH} chars`);
   }
   if (externalNote && externalNote.length > MAX_EXTERNAL_NOTE_LENGTH) {
@@ -2048,7 +2302,7 @@ app.post("/api/admin/users/:id/recharge/backfill", async (c) => {
       days,
       reason: reasonRaw,
       paymentAmountCents: toPaymentAmountCents(paymentAmount),
-      internalNote,
+      internalNote: auditedInternalNote,
       externalNote,
       occurredAt,
       source: RechargeRecordSource.BACKFILL
@@ -2061,7 +2315,8 @@ app.post("/api/admin/users/:id/recharge/backfill", async (c) => {
       await applyReferralEffectsForRecharge(c, {
         userId,
         recharge: payload,
-        occurredAt: now
+        occurredAt: now,
+        allowBackfillReward: grantReferralReward
       });
     } catch (error) {
       console.error("apply referral effect after backfill failed", error);
@@ -2116,6 +2371,8 @@ app.post("/api/admin/recharge-records/:id/refund", async (c) => {
         r.source,
         r.change_days,
         r.payment_amount_cents,
+        r.expire_before,
+        r.expire_after,
         r.refunded_at
        FROM recharge_records AS r
        INNER JOIN users AS u ON u.id = r.user_id
@@ -2137,20 +2394,32 @@ app.post("/api/admin/recharge-records/:id/refund", async (c) => {
     return fail(c, 400, "refund rollback records cannot be refunded again");
   }
 
-  const originalPaymentAmount = toPaymentAmount(target.payment_amount_cents);
-  const resolvedRefundAmount = refundAmount ?? originalPaymentAmount;
-  if (
-    resolvedRefundAmount < 0 ||
-    resolvedRefundAmount > originalPaymentAmount
-  ) {
+  const now = getCurrentTimestamp();
+  const refundUsage = calculateRefundUsageSnapshot(target, now);
+  if (refundUsage.refundableDays <= 0 || refundUsage.refundableAmountCents <= 0) {
+    return fail(c, 400, "no refundable days left for this recharge record");
+  }
+
+  const resolvedRefundAmount = toPaymentAmount(refundUsage.refundableAmountCents);
+  if (refundAmount !== null) {
+    const requestedRefundAmount = Number(refundAmount.toFixed(2));
+    if (requestedRefundAmount !== resolvedRefundAmount) {
+      return fail(
+        c,
+        400,
+        `refundAmount must equal ${resolvedRefundAmount.toFixed(2)} under remaining-days refund rule`
+      );
+    }
+  }
+
+  if (resolvedRefundAmount < 0) {
     return fail(
       c,
       400,
-      `refundAmount must be between 0 and ${originalPaymentAmount.toFixed(2)}`
+      `refundAmount must be ${resolvedRefundAmount.toFixed(2)}`
     );
   }
 
-  const now = getCurrentTimestamp();
   const session = c.get("adminSession");
   const markResult = await c.env.DB
     .prepare(
@@ -2162,7 +2431,7 @@ app.post("/api/admin/recharge-records/:id/refund", async (c) => {
       now,
       refundNote,
       session.adminId,
-      toPaymentAmountCents(resolvedRefundAmount),
+      refundUsage.refundableAmountCents,
       rechargeRecordId
     )
     .run();
@@ -2173,7 +2442,7 @@ app.post("/api/admin/recharge-records/:id/refund", async (c) => {
   try {
     const rollbackPayload = await createAndRebuildRechargeRecord(c, {
       userId: target.user_id,
-      days: -Math.abs(target.change_days),
+      days: -refundUsage.refundableDays,
       reason: RechargeReason.MANUAL_FIX,
       paymentAmountCents: 0,
       internalNote: `refund rollback for recharge record ${rechargeRecordId}`,
@@ -2187,6 +2456,7 @@ app.post("/api/admin/recharge-records/:id/refund", async (c) => {
 
     await cancelReferralRewardsByRechargeRecord(c.env.DB, {
       rechargeRecordId,
+      refundAmountCents: refundUsage.refundableAmountCents,
       reason: "recharge refunded",
       now
     });
@@ -2455,6 +2725,7 @@ app.get("/api/admin/referral/dashboard", async (c) => {
     return referralCheck.response;
   }
 
+  await unlockPendingReferralRewards(c.env.DB, getCurrentTimestamp());
   const payload: AdminReferralDashboardDTO = await getReferralDashboard(c.env.DB);
   return ok(c, payload);
 });
@@ -2475,6 +2746,8 @@ app.get("/api/admin/referral-rewards", async (c) => {
   if (!referralCheck.ok) {
     return referralCheck.response;
   }
+
+  await unlockPendingReferralRewards(c.env.DB, getCurrentTimestamp());
 
   const rawLimit = Number(c.req.query("limit"));
   const limit =
@@ -2510,9 +2783,15 @@ app.get("/api/admin/referral-rewards", async (c) => {
             l.payment_amount_cents,
             l.reward_rate_bps,
             l.reward_amount_cents,
+            l.unlock_start_at,
+            l.total_days,
+            l.unlocked_days,
+            l.unlocked_amount_cents,
+            l.withdrawn_amount_cents,
             l.status,
             l.unlock_at,
             l.available_at,
+            l.fully_unlocked_at,
             l.canceled_at,
             l.canceled_reason,
             l.withdrawn_at,
@@ -2541,9 +2820,15 @@ app.get("/api/admin/referral-rewards", async (c) => {
             l.payment_amount_cents,
             l.reward_rate_bps,
             l.reward_amount_cents,
+            l.unlock_start_at,
+            l.total_days,
+            l.unlocked_days,
+            l.unlocked_amount_cents,
+            l.withdrawn_amount_cents,
             l.status,
             l.unlock_at,
             l.available_at,
+            l.fully_unlocked_at,
             l.canceled_at,
             l.canceled_reason,
             l.withdrawn_at,
@@ -2586,6 +2871,8 @@ app.get("/api/admin/referral-withdrawals", async (c) => {
         w.inviter_user_id,
         inviter.username AS inviter_username,
         w.amount_cents,
+        w.gross_amount_cents,
+        w.debt_offset_cents,
         w.processed_by_admin_id,
         admin.username AS processed_by_admin_username,
         w.note,
@@ -2643,6 +2930,8 @@ app.post("/api/admin/referral-withdrawals", async (c) => {
         w.inviter_user_id,
         inviter.username AS inviter_username,
         w.amount_cents,
+        w.gross_amount_cents,
+        w.debt_offset_cents,
         w.processed_by_admin_id,
         admin.username AS processed_by_admin_username,
         w.note,
@@ -2662,7 +2951,9 @@ app.post("/api/admin/referral-withdrawals", async (c) => {
   const payload: AdminWithdrawReferralRewardsResponseDTO = {
     withdrawal: toAdminReferralWithdrawalDTO(withdrawal),
     withdrawnCount: withdrawResult.withdrawnCount,
-    withdrawnAmount: toPaymentAmount(withdrawResult.withdrawnAmountCents)
+    withdrawnAmount: toPaymentAmount(withdrawResult.withdrawnAmountCents),
+    grossAmount: toPaymentAmount(withdrawResult.grossAmountCents),
+    debtOffsetAmount: toPaymentAmount(withdrawResult.debtOffsetCents)
   };
   return ok(c, payload);
 });
@@ -2758,7 +3049,9 @@ const scheduled: ExportedHandlerScheduledHandler<Bindings> = async (
   env,
   _ctx
 ) => {
-  const hasTables = await hasReferralTables(env.DB);
+  const hasTables =
+    (await hasReferralTables(env.DB)) &&
+    (await hasReferralDailyUnlockColumns(env.DB));
   if (!hasTables) {
     return;
   }

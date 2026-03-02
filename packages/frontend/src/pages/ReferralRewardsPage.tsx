@@ -198,15 +198,9 @@ export const ReferralRewardsPage = () => {
   const summary = useMemo(() => {
     return filteredItems.reduce(
       (acc, item) => {
-        if (item.status === ReferralRewardStatus.PENDING) {
-          acc.pending += item.rewardAmount;
-        }
-        if (item.status === ReferralRewardStatus.AVAILABLE) {
-          acc.available += item.rewardAmount;
-        }
-        if (item.status === ReferralRewardStatus.WITHDRAWN) {
-          acc.withdrawn += item.rewardAmount;
-        }
+        acc.pending += Math.max(item.rewardAmount - item.unlockedRewardAmount, 0);
+        acc.available += item.withdrawableRewardAmount;
+        acc.withdrawn += item.withdrawnRewardAmount;
         return acc;
       },
       { pending: 0, available: 0, withdrawn: 0 },
@@ -225,6 +219,10 @@ export const ReferralRewardsPage = () => {
       SOURCE_LABELS[item.rechargeSource] ?? item.rechargeSource,
       item.paymentAmount.toFixed(2),
       item.rewardAmount.toFixed(2),
+      item.unlockedRewardAmount.toFixed(2),
+      item.withdrawableRewardAmount.toFixed(2),
+      item.withdrawnRewardAmount.toFixed(2),
+      `${item.unlockedDays}/${item.totalDays}`,
       STATUS_LABELS[item.status],
       formatUnixSeconds(item.unlockAt),
       formatUnixSeconds(item.availableAt),
@@ -248,8 +246,12 @@ export const ReferralRewardsPage = () => {
         "充值来源",
         "充值金额(元)",
         "奖励金额(元)",
+        "已解锁金额(元)",
+        "可提现金额(元)",
+        "已提现金额(元)",
+        "解锁进度(天)",
         "状态",
-        "解锁时间",
+        "预计全解锁时间",
         "可提现时间",
         "提现时间",
         "失效时间",
@@ -332,6 +334,33 @@ export const ReferralRewardsPage = () => {
         render: (value: number) => formatCurrency(value),
       },
       {
+        title: "已解锁",
+        dataIndex: "unlockedRewardAmount",
+        key: "unlockedRewardAmount",
+        width: 110,
+        render: (value: number) => formatCurrency(value),
+      },
+      {
+        title: "可提现",
+        dataIndex: "withdrawableRewardAmount",
+        key: "withdrawableRewardAmount",
+        width: 110,
+        render: (value: number) => formatCurrency(value),
+      },
+      {
+        title: "已提现",
+        dataIndex: "withdrawnRewardAmount",
+        key: "withdrawnRewardAmount",
+        width: 110,
+        render: (value: number) => formatCurrency(value),
+      },
+      {
+        title: "解锁进度",
+        key: "unlockProgress",
+        width: 130,
+        render: (_, record) => `${record.unlockedDays}/${record.totalDays} 天`,
+      },
+      {
         title: "状态",
         dataIndex: "status",
         key: "status",
@@ -341,7 +370,7 @@ export const ReferralRewardsPage = () => {
         ),
       },
       {
-        title: "解锁时间",
+        title: "预计全解锁时间",
         dataIndex: "unlockAt",
         key: "unlockAt",
         width: 170,
@@ -449,7 +478,7 @@ export const ReferralRewardsPage = () => {
           columns={columns}
           dataSource={filteredItems}
           pagination={{ pageSize: 20, showSizeChanger: false }}
-          scroll={{ x: 1800 }}
+          scroll={{ x: 2400 }}
         />
       </Card>
     </main>

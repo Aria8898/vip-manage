@@ -159,12 +159,22 @@ export const ReferralWithdrawalsPage = () => {
     () => filteredItems.reduce((sum, item) => sum + item.amount, 0),
     [filteredItems],
   );
+  const totalGrossAmount = useMemo(
+    () => filteredItems.reduce((sum, item) => sum + item.grossAmount, 0),
+    [filteredItems],
+  );
+  const totalDebtOffsetAmount = useMemo(
+    () => filteredItems.reduce((sum, item) => sum + item.debtOffsetAmount, 0),
+    [filteredItems],
+  );
 
   const handleExport = () => {
     const rows = filteredItems.map((item) => [
       item.id,
       item.inviterUsername,
       item.inviterUserId,
+      item.grossAmount.toFixed(2),
+      item.debtOffsetAmount.toFixed(2),
       item.amount.toFixed(2),
       item.processedByAdminUsername,
       item.processedByAdminId,
@@ -179,6 +189,8 @@ export const ReferralWithdrawalsPage = () => {
         "提现ID",
         "邀请人",
         "邀请人ID",
+        "毛额(元)",
+        "抵扣债务(元)",
         "提现金额(元)",
         "处理管理员",
         "处理管理员ID",
@@ -210,6 +222,20 @@ export const ReferralWithdrawalsPage = () => {
             </Typography.Text>
           </Space>
         ),
+      },
+      {
+        title: "毛额",
+        dataIndex: "grossAmount",
+        key: "grossAmount",
+        width: 120,
+        render: (value: number) => formatCurrency(value),
+      },
+      {
+        title: "抵扣债务",
+        dataIndex: "debtOffsetAmount",
+        key: "debtOffsetAmount",
+        width: 120,
+        render: (value: number) => formatCurrency(value),
       },
       {
         title: "提现金额",
@@ -302,6 +328,8 @@ export const ReferralWithdrawalsPage = () => {
         </Space>
 
         <Space size={24} wrap style={{ marginBottom: 12 }}>
+          <Statistic title="提现毛额" value={totalGrossAmount} prefix="¥" precision={2} />
+          <Statistic title="抵扣债务" value={totalDebtOffsetAmount} prefix="¥" precision={2} />
           <Statistic title="提现总额" value={totalAmount} prefix="¥" precision={2} />
           <Statistic title="记录数" value={filteredItems.length} />
         </Space>
@@ -312,7 +340,7 @@ export const ReferralWithdrawalsPage = () => {
           columns={columns}
           dataSource={filteredItems}
           pagination={{ pageSize: 20, showSizeChanger: false }}
-          scroll={{ x: 1300 }}
+          scroll={{ x: 1600 }}
         />
       </Card>
     </main>

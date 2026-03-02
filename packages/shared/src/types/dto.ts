@@ -57,6 +57,9 @@ export interface AdminUserDTO extends UserSummaryDTO {
   inviteeCount?: number;
   pendingRewardAmount?: number;
   availableRewardAmount?: number;
+  rewardDebtAmount?: number;
+  grossAvailableRewardAmount?: number;
+  netWithdrawableAmount?: number;
 }
 
 export interface AdminCreateUserResponseDTO {
@@ -142,6 +145,7 @@ export interface AdminBackfillRechargeRequestDTO {
   reason: RechargeReason;
   paymentAmount: number;
   occurredAt: number;
+  grantReferralReward?: boolean;
   internalNote?: string;
   externalNote?: string;
 }
@@ -186,6 +190,11 @@ export interface AdminReferralRewardRecordDTO {
   paymentAmount: number;
   rewardRateBps: number;
   rewardAmount: number;
+  unlockedRewardAmount: number;
+  withdrawableRewardAmount: number;
+  withdrawnRewardAmount: number;
+  totalDays: number;
+  unlockedDays: number;
   status: ReferralRewardStatus;
   unlockAt: number;
   availableAt: number | null;
@@ -208,6 +217,8 @@ export interface AdminReferralWithdrawalDTO {
   inviterUserId: string;
   inviterUsername: string;
   amount: number;
+  grossAmount: number;
+  debtOffsetAmount: number;
   processedByAdminId: string;
   processedByAdminUsername: string;
   note: string | null;
@@ -228,12 +239,17 @@ export interface AdminWithdrawReferralRewardsResponseDTO {
   withdrawal: AdminReferralWithdrawalDTO;
   withdrawnCount: number;
   withdrawnAmount: number;
+  grossAmount: number;
+  debtOffsetAmount: number;
 }
 
 export interface AdminReferralDashboardDTO {
   pendingAmount: number;
   availableAmount: number;
   withdrawnAmount: number;
+  grossAvailableAmount: number;
+  debtAmount: number;
+  withdrawThresholdAmount: number;
   pendingCount: number;
   availableCount: number;
 }
@@ -293,6 +309,8 @@ export interface UserReferralSummaryDTO {
   availableRewardAmount: number;
   withdrawnRewardAmount: number;
   totalRewardAmount: number;
+  rewardDebtAmount: number;
+  netWithdrawableAmount: number;
   invitees: UserInviteeRewardSummaryDTO[];
 }
 

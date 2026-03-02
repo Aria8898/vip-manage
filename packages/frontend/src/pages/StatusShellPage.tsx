@@ -259,8 +259,14 @@ export const StatusShellPage = () => {
                   prefix="¥"
                 />
                 <Statistic
-                  title="可提现"
+                  title="可提现（净额）"
                   value={statusData.referral.availableRewardAmount}
+                  precision={2}
+                  prefix="¥"
+                />
+                <Statistic
+                  title="奖励债务"
+                  value={statusData.referral.rewardDebtAmount}
                   precision={2}
                   prefix="¥"
                 />
@@ -272,7 +278,7 @@ export const StatusShellPage = () => {
                 />
               </Space>
               <Typography.Text type="secondary" style={{ display: "block" }}>
-                结算说明：单笔充值到期后预计奖励转为可提现；若该笔发生退款，奖励会失效。
+                结算说明：被邀请人每成功使用 24 小时解锁一天奖励；退款后会按剩余天数回收未结算奖励，净可提现会先抵扣历史债务。
               </Typography.Text>
 
               {statusData.referral.invitees.length > 0 ? (
