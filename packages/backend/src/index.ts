@@ -316,6 +316,7 @@ interface UserStatusHistoryRow {
   id: string;
   change_days: number;
   reason: string;
+  payment_amount_cents: number | null;
   external_note: string | null;
   expire_before: number;
   expire_after: number;
@@ -1222,6 +1223,7 @@ const toUserStatusHistoryRecordDTO = (
   id: row.id,
   changeDays: row.change_days,
   reason: toRechargeReason(row.reason),
+  paymentAmount: toPaymentAmount(row.payment_amount_cents),
   externalNote: row.external_note,
   expireBefore: row.expire_before,
   expireAfter: row.expire_after,
@@ -1705,6 +1707,7 @@ app.get("/api/status/:token", async (c) => {
         id,
         change_days,
         reason,
+        payment_amount_cents,
         ${externalNoteSelect},
         expire_before,
         expire_after,
@@ -1722,6 +1725,7 @@ app.get("/api/status/:token", async (c) => {
         id,
         change_days,
         reason,
+        0 AS payment_amount_cents,
         NULL AS external_note,
         expire_before,
         expire_after,

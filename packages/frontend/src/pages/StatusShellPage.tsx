@@ -119,6 +119,9 @@ const getHistoryReasonVisual = (
 const formatHistoryChangeDays = (record: UserStatusHistoryRecordDTO): string =>
   `${record.changeDays >= 0 ? "+" : ""}${record.changeDays} 天`;
 
+const formatHistoryPaymentAmount = (record: UserStatusHistoryRecordDTO): string =>
+  record.paymentAmount > 0 ? formatCurrency(record.paymentAmount) : "不涉及支付";
+
 export const StatusShellPage = () => {
   const { token } = useParams<{ token: string }>();
   const location = useLocation();
@@ -358,16 +361,24 @@ export const StatusShellPage = () => {
               return {
                 color: reasonVisual.timelineColor,
                 children: (
-                  <Space direction="vertical" size={0}>
-                    <Space wrap size={8} className="status-history-summary">
+                  <div className="status-history-item">
+                    <Space wrap size={6} className="status-history-meta-row">
                       <Tag
                         className="status-history-reason-tag"
                         style={reasonVisual.reasonTagStyle}
                       >
                         {reasonText}
                       </Tag>
+                      <Typography.Text type="secondary" className="status-history-time">
+                        · {formatUnixSeconds(item.createdAt)}
+                      </Typography.Text>
+                    </Space>
+                    <Space wrap size={12} className="status-history-metrics-row">
                       <Typography.Text style={reasonVisual.changeDaysStyle}>
-                        {formatHistoryChangeDays(item)}
+                        会员天数：{formatHistoryChangeDays(item)}
+                      </Typography.Text>
+                      <Typography.Text className="status-history-payment">
+                        支付金额：{formatHistoryPaymentAmount(item)}
                       </Typography.Text>
                     </Space>
                     {item.externalNote ? (
@@ -375,14 +386,11 @@ export const StatusShellPage = () => {
                         {item.externalNote}
                       </Typography.Text>
                     ) : null}
-                    <Typography.Text type="secondary">
-                      {formatUnixSeconds(item.createdAt)}
-                    </Typography.Text>
-                    <Typography.Text type="secondary">
+                    <Typography.Text type="secondary" className="status-history-expire">
                       到期变更：{formatUnixSeconds(item.expireBefore)} →{" "}
                       {formatUnixSeconds(item.expireAfter)}
                     </Typography.Text>
-                  </Space>
+                  </div>
                 ),
               };
             })}

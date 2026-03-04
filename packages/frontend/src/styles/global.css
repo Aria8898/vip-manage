@@ -218,12 +218,34 @@ body {
   margin-top: 16px;
 }
 
-.status-history-summary {
+.status-history-reason-tag {
+  margin-inline-end: 0;
+}
+
+.status-history-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.status-history-meta-row {
   align-items: center;
 }
 
-.status-history-reason-tag {
-  margin-inline-end: 0;
+.status-history-time {
+  font-size: 12px;
+}
+
+.status-history-metrics-row {
+  align-items: center;
+}
+
+.status-history-payment {
+  color: rgba(0, 0, 0, 0.72);
+}
+
+.status-history-expire {
+  display: block;
 }
 
 .admin-header-card,

@@ -293,6 +293,7 @@ export interface UserStatusHistoryRecordDTO {
   id: string;
   changeDays: number;
   reason: RechargeReason;
+  paymentAmount: number;
   externalNote: string | null;
   expireBefore: number;
   expireAfter: number;
