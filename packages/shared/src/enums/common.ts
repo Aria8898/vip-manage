@@ -38,3 +38,8 @@ export enum ReferralBonusStatus {
   GRANTED = "granted",
   REVOKED = "revoked"
 }
+
+export enum InviteRewardMode {
+  ALLOWLIST = "allowlist",
+  PUBLIC = "public"
+}

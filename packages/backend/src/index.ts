@@ -2,6 +2,7 @@ import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { sign, verify } from "hono/jwt";
 import {
+  InviteRewardMode,
   MembershipStatus,
   ReferralRewardStatus,
   RechargeReason,
@@ -33,6 +34,8 @@ import {
   type AdminUpdateUserRequestDTO,
   type AdminUpdateUserInviteCodeRequestDTO,
   type AdminUpdateUserInviteCodeResponseDTO,
+  type AdminUpdateReferralRewardEligibilityRequestDTO,
+  type AdminUpdateReferralRewardEligibilityResponseDTO,
   type AdminUpdateUserResponseDTO,
   type AdminUserDTO,
   type AdminUserProfileChangeRecordDTO,
@@ -60,6 +63,7 @@ import {
   createReferralRewardForRecharge,
   findGrantedBonusByTriggerRechargeRecord,
   getReferralDashboard,
+  isInviterReferralRewardEligible,
   markBonusGrantRevoked,
   reserveInviteeBonusGrant,
   summarizeReferralRewardsByInviter,
@@ -73,6 +77,7 @@ type Bindings = {
   JWT_SECRET?: string;
   USER_TOKEN_SECRET?: string;
   ADMIN_SESSION_TTL_SECONDS?: string;
+  INVITE_REWARD_MODE?: string;
 };
 
 type AdminSessionContext = {
@@ -115,7 +120,7 @@ const INVITE_CODE_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const SYSTEM_INVITE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const COMPACT_USER_TOKEN_MARKER = 2;
 const COMPACT_USER_TOKEN_SIGNATURE_BYTES = 16;
-type HttpStatus = 200 | 400 | 401 | 404 | 409 | 429 | 500;
+type HttpStatus = 200 | 400 | 401 | 403 | 404 | 409 | 429 | 500;
 
 interface AdminUserRow {
   id: string;
@@ -136,6 +141,7 @@ interface UserRow {
   updated_at: number;
   token_version?: number;
   access_token_hash?: string;
+  referral_reward_eligible?: number | string | null;
 }
 
 interface InviteAliasRow {
@@ -310,6 +316,7 @@ interface UserStatusRow {
   username: string;
   user_email?: string | null;
   expire_at: number;
+  referral_reward_eligible?: number | string | null;
 }
 
 interface UserStatusHistoryRow {
@@ -347,6 +354,7 @@ let cachedHasReferralTables: boolean | null = null;
 let cachedHasReferralDailyUnlockColumns: boolean | null = null;
 let cachedHasUsersInviteCodeColumn: boolean | null = null;
 let cachedHasInviteAliasesTable: boolean | null = null;
+let cachedHasUsersReferralRewardEligibilityColumn: boolean | null = null;
 
 const getCurrentTimestamp = (): number => Math.floor(Date.now() / 1000);
 
@@ -363,6 +371,17 @@ const parseSessionTtlSeconds = (value: string | undefined): number => {
 
   return parsed;
 };
+
+const parseInviteRewardMode = (value: string | undefined): InviteRewardMode => {
+  if (typeof value === "string" && value.trim().toLowerCase() === InviteRewardMode.PUBLIC) {
+    return InviteRewardMode.PUBLIC;
+  }
+
+  return InviteRewardMode.ALLOWLIST;
+};
+
+const getInviteRewardMode = (env: Bindings): InviteRewardMode =>
+  parseInviteRewardMode(env.INVITE_REWARD_MODE);
 
 const getClientIp = (request: Request): string => {
   const cfIp = request.headers.get("cf-connecting-ip");
@@ -565,7 +584,8 @@ const toAdminUserDTO = async (
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     tokenVersion,
-    statusToken
+    statusToken,
+    referralRewardEligible: Number(row.referral_reward_eligible || 0) > 0
   };
 };
 
@@ -605,6 +625,18 @@ const hasUsersInviteCodeColumn = async (db: D1Database): Promise<boolean> => {
   const rows = await db.prepare("PRAGMA table_info(users)").all<SqliteTableInfoRow>();
   const hasColumn = (rows.results || []).some((row) => row.name === "system_invite_code");
   cachedHasUsersInviteCodeColumn = hasColumn;
+
+  return hasColumn;
+};
+
+const hasUsersReferralRewardEligibilityColumn = async (db: D1Database): Promise<boolean> => {
+  if (cachedHasUsersReferralRewardEligibilityColumn !== null) {
+    return cachedHasUsersReferralRewardEligibilityColumn;
+  }
+
+  const rows = await db.prepare("PRAGMA table_info(users)").all<SqliteTableInfoRow>();
+  const hasColumn = (rows.results || []).some((row) => row.name === "referral_reward_eligible");
+  cachedHasUsersReferralRewardEligibilityColumn = hasColumn;
 
   return hasColumn;
 };
@@ -1308,6 +1340,20 @@ const requireReferralTables = async (
   return { ok: true };
 };
 
+const requireReferralRewardEligibilityColumn = async (
+  c: AppContext
+): Promise<{ ok: true } | { ok: false; response: Response }> => {
+  const hasColumn = await hasUsersReferralRewardEligibilityColumn(c.env.DB);
+  if (!hasColumn) {
+    return {
+      ok: false,
+      response: fail(c, 500, "database migration required: users.referral_reward_eligible column missing")
+    };
+  }
+
+  return { ok: true };
+};
+
 const requireInviteCodeSupport = async (
   c: AppContext
 ): Promise<{ ok: true } | { ok: false; response: Response }> => {
@@ -1526,6 +1572,13 @@ const applyReferralEffectsForRecharge = async (
     allowBackfillReward?: boolean;
   }
 ): Promise<void> => {
+  const inviteRewardMode = getInviteRewardMode(c.env);
+  if (
+    inviteRewardMode === InviteRewardMode.ALLOWLIST &&
+    !(await hasUsersReferralRewardEligibilityColumn(c.env.DB))
+  ) {
+    return;
+  }
   const isBackfillRecharge = params.recharge.record.source === RechargeRecordSource.BACKFILL;
   const useRetroactiveBackfillUnlock =
     isBackfillRecharge && params.allowBackfillReward === true;
@@ -1541,6 +1594,7 @@ const applyReferralEffectsForRecharge = async (
     paymentAmountCents: toPaymentAmountCents(params.recharge.record.paymentAmount),
     totalDays: Math.max(params.recharge.record.changeDays, 1),
     unlockStartAt,
+    inviteRewardMode,
     allowBackfillReward: params.allowBackfillReward,
     now: params.occurredAt
   });
@@ -1673,9 +1727,13 @@ app.get("/api/status/:token", async (c) => {
   const profileSelect = hasUsersProfileColumns
     ? "user_email"
     : "NULL AS user_email";
+  const hasReferralRewardEligibilityColumn = await hasUsersReferralRewardEligibilityColumn(c.env.DB);
+  const referralRewardEligibleSelect = hasReferralRewardEligibilityColumn
+    ? "referral_reward_eligible"
+    : "0 AS referral_reward_eligible";
   const tokenHash = await sha256Hex(token);
   const user = await c.env.DB.prepare(
-    `SELECT id, username, ${profileSelect}, expire_at
+    `SELECT id, username, ${profileSelect}, ${referralRewardEligibleSelect}, expire_at
      FROM users
      WHERE access_token_hash = ?
      LIMIT 1`
@@ -1740,13 +1798,24 @@ app.get("/api/status/:token", async (c) => {
       .all<UserStatusHistoryRow>();
 
   const now = getCurrentTimestamp();
+  const inviteRewardMode = getInviteRewardMode(c.env);
   const referralEnabled =
     (await hasReferralTables(c.env.DB)) &&
     (await hasReferralDailyUnlockColumns(c.env.DB));
-  if (referralEnabled) {
+  const referralRewardEligible = referralEnabled
+    ? (
+      inviteRewardMode === InviteRewardMode.PUBLIC ||
+      (
+        hasReferralRewardEligibilityColumn &&
+        (await isInviterReferralRewardEligible(c.env.DB, user.id, inviteRewardMode))
+      )
+    )
+    : false;
+  const canViewReferralReward = referralEnabled && referralRewardEligible;
+  if (canViewReferralReward) {
     await unlockPendingReferralRewards(c.env.DB, now);
   }
-  const inviteeCountRow = referralEnabled
+  const inviteeCountRow = canViewReferralReward
     ? await c.env.DB.prepare(
       `SELECT COUNT(*) AS invitee_count
        FROM user_referrals
@@ -1755,7 +1824,7 @@ app.get("/api/status/:token", async (c) => {
       .bind(user.id)
       .first<UserInviteeCountRow>()
     : null;
-  const referralSummaryRow = referralEnabled
+  const referralSummaryRow = canViewReferralReward
     ? await c.env.DB.prepare(
       `SELECT
         COALESCE(SUM(
@@ -1803,7 +1872,7 @@ app.get("/api/status/:token", async (c) => {
       .bind(user.id, user.id)
       .first<UserReferralSummaryRow>()
     : null;
-  const inviteeRewardRows = referralEnabled
+  const inviteeRewardRows = canViewReferralReward
     ? await c.env.DB.prepare(
       `SELECT
         l.invitee_user_id,
@@ -1902,6 +1971,11 @@ app.get("/api/status/:token", async (c) => {
         withdrawnRewardAmount: toPaymentAmount(toNonNegativeInt(row.withdrawn_amount_cents)),
         totalRewardAmount: toPaymentAmount(toNonNegativeInt(row.reward_amount_cents))
       }))
+    },
+    capabilities: {
+      inviteRewardMode,
+      referralRewardEligible,
+      canViewReferralReward
     },
     now
   };
@@ -2137,6 +2211,7 @@ app.post("/api/admin/users", async (c) => {
       updatedAt: now,
       tokenVersion,
       statusToken,
+      referralRewardEligible: false,
       inviterUserId: resolvedInviterUserId
     }
   };
@@ -2156,6 +2231,8 @@ app.get("/api/admin/users", async (c) => {
   const hasUsersProfileColumns = await hasUsersExtraProfileColumns(c.env.DB);
   const hasInviteCodeColumn = await hasUsersInviteCodeColumn(c.env.DB);
   const hasAliasTable = await hasInviteAliasesTable(c.env.DB);
+  const hasReferralRewardEligibilityColumn =
+    await hasUsersReferralRewardEligibilityColumn(c.env.DB);
   const tokenVersionSelect = hasTokenVersionColumn
     ? "token_version"
     : `${DEFAULT_USER_TOKEN_VERSION} AS token_version`;
@@ -2172,6 +2249,9 @@ app.get("/api/admin/users", async (c) => {
         ORDER BY ia.updated_at DESC, ia.id DESC
         LIMIT 1) AS custom_invite_code`
     : "NULL AS custom_invite_code";
+  const referralRewardEligibleSelect = hasReferralRewardEligibilityColumn
+    ? "u.referral_reward_eligible"
+    : "0 AS referral_reward_eligible";
 
   const rows = query
     ? await (async () => {
@@ -2202,6 +2282,7 @@ app.get("/api/admin/users", async (c) => {
           ${profileSelect},
           ${systemInviteCodeSelect},
           ${customInviteCodeSelect},
+          ${referralRewardEligibleSelect},
           u.expire_at,
           u.created_at,
           u.updated_at,
@@ -2222,6 +2303,7 @@ app.get("/api/admin/users", async (c) => {
         ${profileSelect},
         ${systemInviteCodeSelect},
         ${customInviteCodeSelect},
+        ${referralRewardEligibleSelect},
         u.expire_at,
         u.created_at,
         u.updated_at,
@@ -2360,6 +2442,8 @@ app.patch("/api/admin/users/:id", async (c) => {
   const hasTokenVersionColumn = await hasUsersTokenVersionColumn(c.env.DB);
   const hasInviteCodeColumn = await hasUsersInviteCodeColumn(c.env.DB);
   const hasAliasTable = await hasInviteAliasesTable(c.env.DB);
+  const hasReferralRewardEligibilityColumn =
+    await hasUsersReferralRewardEligibilityColumn(c.env.DB);
   const tokenVersionSelect = hasTokenVersionColumn
     ? "token_version"
     : `${DEFAULT_USER_TOKEN_VERSION} AS token_version`;
@@ -2373,6 +2457,9 @@ app.patch("/api/admin/users/:id", async (c) => {
         ORDER BY updated_at DESC, id DESC
         LIMIT 1) AS custom_invite_code`
     : "NULL AS custom_invite_code";
+  const referralRewardEligibleSelect = hasReferralRewardEligibilityColumn
+    ? "referral_reward_eligible"
+    : "0 AS referral_reward_eligible";
   const user = await c.env.DB.prepare(
     `SELECT
       id,
@@ -2382,6 +2469,7 @@ app.patch("/api/admin/users/:id", async (c) => {
       user_email,
       ${systemInviteCodeSelect},
       ${customInviteCodeSelect},
+      ${referralRewardEligibleSelect},
       expire_at,
       created_at,
       updated_at,
@@ -2564,9 +2652,14 @@ app.put("/api/admin/users/:id/invite-code", async (c) => {
     return fail(c, 400, "user id is required");
   }
   const hasTokenVersionColumn = await hasUsersTokenVersionColumn(c.env.DB);
+  const hasReferralRewardEligibilityColumn =
+    await hasUsersReferralRewardEligibilityColumn(c.env.DB);
   const tokenVersionSelect = hasTokenVersionColumn
     ? "token_version"
     : `${DEFAULT_USER_TOKEN_VERSION} AS token_version`;
+  const referralRewardEligibleSelect = hasReferralRewardEligibilityColumn
+    ? "referral_reward_eligible"
+    : "0 AS referral_reward_eligible";
 
   const body = await c.req
     .json<Partial<AdminUpdateUserInviteCodeRequestDTO>>()
@@ -2587,6 +2680,7 @@ app.put("/api/admin/users/:id/invite-code", async (c) => {
         expire_at,
         created_at,
         updated_at,
+        ${referralRewardEligibleSelect},
         ${tokenVersionSelect},
         access_token_hash
        FROM users
@@ -2639,6 +2733,95 @@ app.put("/api/admin/users/:id/invite-code", async (c) => {
       },
       tokenSecret
     )
+  };
+
+  return ok(c, payload);
+});
+
+app.patch("/api/admin/users/:id/referral-reward-eligibility", async (c) => {
+  const referralEligibilityCheck = await requireReferralRewardEligibilityColumn(c);
+  if (!referralEligibilityCheck.ok) {
+    return referralEligibilityCheck.response;
+  }
+
+  const tokenSecret = getUserTokenSecret(c.env);
+  if (!tokenSecret) {
+    return fail(c, 500, "user token secret is not configured");
+  }
+
+  const userId = c.req.param("id")?.trim();
+  if (!userId) {
+    return fail(c, 400, "user id is required");
+  }
+
+  const body = await c.req
+    .json<Partial<AdminUpdateReferralRewardEligibilityRequestDTO>>()
+    .catch(() => null);
+  if (typeof body?.referralRewardEligible !== "boolean") {
+    return fail(c, 400, "referralRewardEligible must be boolean");
+  }
+
+  const now = getCurrentTimestamp();
+  const nextEligibility = body.referralRewardEligible ? 1 : 0;
+  const updateResult = await c.env.DB
+    .prepare(
+      `UPDATE users
+       SET referral_reward_eligible = ?, updated_at = ?
+       WHERE id = ?`
+    )
+    .bind(nextEligibility, now, userId)
+    .run();
+  if (Number(updateResult.meta?.changes || 0) <= 0) {
+    return fail(c, 404, "user not found");
+  }
+
+  const hasTokenVersionColumn = await hasUsersTokenVersionColumn(c.env.DB);
+  const hasUsersProfileColumns = await hasUsersExtraProfileColumns(c.env.DB);
+  const hasInviteCodeColumn = await hasUsersInviteCodeColumn(c.env.DB);
+  const hasAliasTable = await hasInviteAliasesTable(c.env.DB);
+  const tokenVersionSelect = hasTokenVersionColumn
+    ? "u.token_version"
+    : `${DEFAULT_USER_TOKEN_VERSION} AS token_version`;
+  const profileSelect = hasUsersProfileColumns
+    ? "u.system_email, u.family_group_name, u.user_email"
+    : "NULL AS system_email, NULL AS family_group_name, NULL AS user_email";
+  const systemInviteCodeSelect = hasInviteCodeColumn
+    ? "u.system_invite_code"
+    : "NULL AS system_invite_code";
+  const customInviteCodeSelect = hasAliasTable
+    ? `(SELECT ia.alias
+        FROM invite_aliases AS ia
+        WHERE ia.user_id = u.id AND ia.status = 'active'
+        ORDER BY ia.updated_at DESC, ia.id DESC
+        LIMIT 1) AS custom_invite_code`
+    : "NULL AS custom_invite_code";
+
+  const userRow = await c.env.DB
+    .prepare(
+      `SELECT
+        u.id,
+        u.username,
+        ${profileSelect},
+        ${systemInviteCodeSelect},
+        ${customInviteCodeSelect},
+        u.expire_at,
+        u.created_at,
+        u.updated_at,
+        u.referral_reward_eligible,
+        ${tokenVersionSelect},
+        u.access_token_hash
+       FROM users AS u
+       WHERE u.id = ?
+       LIMIT 1`
+    )
+    .bind(userId)
+    .first<UserRow>();
+  if (!userRow) {
+    return fail(c, 404, "user not found");
+  }
+
+  const payload: AdminUpdateReferralRewardEligibilityResponseDTO = {
+    user: await toAdminUserDTO(userRow, tokenSecret)
   };
 
   return ok(c, payload);
@@ -3209,7 +3392,10 @@ app.get("/api/admin/referral/dashboard", async (c) => {
   }
 
   await unlockPendingReferralRewards(c.env.DB, getCurrentTimestamp());
-  const payload: AdminReferralDashboardDTO = await getReferralDashboard(c.env.DB);
+  const payload: AdminReferralDashboardDTO = {
+    ...(await getReferralDashboard(c.env.DB)),
+    inviteRewardMode: getInviteRewardMode(c.env)
+  };
   return ok(c, payload);
 });
 
@@ -3393,6 +3579,22 @@ app.post("/api/admin/referral-withdrawals", async (c) => {
   const note = normalizeWithdrawNote(body?.note);
   if (note && note.length > MAX_WITHDRAW_NOTE_LENGTH) {
     return fail(c, 400, `note must be <= ${MAX_WITHDRAW_NOTE_LENGTH} chars`);
+  }
+
+  const inviteRewardMode = getInviteRewardMode(c.env);
+  if (inviteRewardMode === InviteRewardMode.ALLOWLIST) {
+    const referralEligibilityCheck = await requireReferralRewardEligibilityColumn(c);
+    if (!referralEligibilityCheck.ok) {
+      return referralEligibilityCheck.response;
+    }
+  }
+  const inviterEligible = await isInviterReferralRewardEligible(
+    c.env.DB,
+    inviterUserId,
+    inviteRewardMode
+  );
+  if (!inviterEligible) {
+    return fail(c, 403, "inviter referral reward access is disabled");
   }
 
   const now = getCurrentTimestamp();

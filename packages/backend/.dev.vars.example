@@ -2,3 +2,5 @@
 JWT_SECRET=replace_me_with_a_long_random_string
 USER_TOKEN_SECRET=replace_me_with_another_long_random_string
 ADMIN_SESSION_TTL_SECONDS=604800
+# allowlist | public
+INVITE_REWARD_MODE=allowlist

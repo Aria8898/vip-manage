@@ -1,4 +1,5 @@
 import {
+  InviteRewardMode,
   RechargeReason,
   RechargeRecordSource,
   ReferralRewardStatus,
@@ -93,6 +94,10 @@ interface RewardRefundRow {
   reward_amount_cents: number;
   unlocked_amount_cents: number;
   withdrawn_amount_cents: number;
+}
+
+interface ReferralRewardEligibilityRow {
+  referral_reward_eligible: number | string | null;
 }
 
 export interface ReferralBindSuccess {
@@ -230,6 +235,28 @@ export const calculateRewardAmountCents = (
   }
 
   return Math.floor((paymentAmountCents * rewardRateBps) / 10000);
+};
+
+export const isInviterReferralRewardEligible = async (
+  db: D1Database,
+  inviterUserId: string,
+  inviteRewardMode: InviteRewardMode
+): Promise<boolean> => {
+  if (inviteRewardMode === InviteRewardMode.PUBLIC) {
+    return true;
+  }
+
+  const row = await db
+    .prepare(
+      `SELECT referral_reward_eligible
+       FROM users
+       WHERE id = ?
+       LIMIT 1`
+    )
+    .bind(inviterUserId)
+    .first<ReferralRewardEligibilityRow>();
+
+  return toPositiveInt(row?.referral_reward_eligible) > 0;
 };
 
 export const bindUserReferral = async (
@@ -489,6 +516,7 @@ export const createReferralRewardForRecharge = async (
     paymentAmountCents: number;
     totalDays: number;
     unlockStartAt: number;
+    inviteRewardMode?: InviteRewardMode;
     allowBackfillReward?: boolean;
     now: number;
   }
@@ -520,6 +548,20 @@ export const createReferralRewardForRecharge = async (
     return {
       created: false,
       inviterUserId: null,
+      rewardAmountCents: 0
+    };
+  }
+
+  const inviteRewardMode = params.inviteRewardMode ?? InviteRewardMode.ALLOWLIST;
+  const inviterEligible = await isInviterReferralRewardEligible(
+    db,
+    referral.inviter_user_id,
+    inviteRewardMode
+  );
+  if (!inviterEligible) {
+    return {
+      created: false,
+      inviterUserId: referral.inviter_user_id,
       rewardAmountCents: 0
     };
   }

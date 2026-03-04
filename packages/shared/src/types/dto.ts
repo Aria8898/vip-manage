@@ -1,4 +1,5 @@
 import type {
+  InviteRewardMode,
   MembershipStatus,
   ReferralBonusStatus,
   ReferralRewardStatus,
@@ -63,6 +64,7 @@ export interface AdminUserDTO extends UserSummaryDTO {
   rewardDebtAmount?: number;
   grossAvailableRewardAmount?: number;
   netWithdrawableAmount?: number;
+  referralRewardEligible?: boolean;
 }
 
 export interface AdminCreateUserResponseDTO {
@@ -190,6 +192,14 @@ export interface AdminUpdateUserInviteCodeResponseDTO {
   user: AdminUserDTO;
 }
 
+export interface AdminUpdateReferralRewardEligibilityRequestDTO {
+  referralRewardEligible: boolean;
+}
+
+export interface AdminUpdateReferralRewardEligibilityResponseDTO {
+  user: AdminUserDTO;
+}
+
 export interface AdminReferralRewardRecordDTO {
   id: string;
   inviterUserId: string;
@@ -264,6 +274,7 @@ export interface AdminReferralDashboardDTO {
   withdrawThresholdAmount: number;
   pendingCount: number;
   availableCount: number;
+  inviteRewardMode?: InviteRewardMode;
 }
 
 export interface AdminReferralBonusGrantDTO {
@@ -331,5 +342,10 @@ export interface UserStatusResponseDTO {
   user: UserStatusDTO;
   history: UserStatusHistoryRecordDTO[];
   referral: UserReferralSummaryDTO;
+  capabilities: {
+    inviteRewardMode: InviteRewardMode;
+    referralRewardEligible: boolean;
+    canViewReferralReward: boolean;
+  };
   now: number;
 }

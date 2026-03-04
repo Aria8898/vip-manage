@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  InviteRewardMode,
   RechargeReason,
   RechargeRecordSource,
   UserProfileChangeField,
@@ -14,6 +15,7 @@ import {
   type AdminRechargeRecordDTO,
   type AdminRechargeUserResponseDTO,
   type AdminUpdateUserInviteCodeResponseDTO,
+  type AdminUpdateReferralRewardEligibilityResponseDTO,
   type AdminUpdateUserResponseDTO,
   type AdminUserDTO,
   type AdminUserProfileChangeRecordDTO,
@@ -223,6 +225,8 @@ export const AdminShellPage = () => {
     useState<AdminUserDTO | null>(null);
   const [resettingTokenUserId, setResettingTokenUserId] = useState("");
   const [withdrawingUserId, setWithdrawingUserId] = useState("");
+  const [updatingReferralEligibilityUserId, setUpdatingReferralEligibilityUserId] =
+    useState("");
   const [refundModalOpen, setRefundModalOpen] = useState(false);
   const [refundTargetRecord, setRefundTargetRecord] =
     useState<AdminRechargeRecordDTO | null>(null);
@@ -799,6 +803,36 @@ export const AdminShellPage = () => {
     }
   };
 
+  const handleUpdateReferralRewardEligibility = async (
+    user: AdminUserDTO,
+    referralRewardEligible: boolean,
+  ) => {
+    setUpdatingReferralEligibilityUserId(user.id);
+
+    try {
+      const response =
+        await apiRequest<AdminUpdateReferralRewardEligibilityResponseDTO>(
+          `/admin/users/${encodeURIComponent(user.id)}/referral-reward-eligibility`,
+          {
+            method: "PATCH",
+            body: JSON.stringify({
+              referralRewardEligible,
+            }),
+          },
+        );
+      await loadUsers(activeQuery);
+      messageApi.success(
+        `${response.data.user.username} 邀请奖励资格已${referralRewardEligible ? "开通" : "关闭"}`,
+      );
+    } catch (error) {
+      messageApi.error(
+        error instanceof Error ? error.message : "更新邀请奖励资格失败",
+      );
+    } finally {
+      setUpdatingReferralEligibilityUserId("");
+    }
+  };
+
   const handleRefundRechargeRecord = async () => {
     if (!refundTargetRecord) {
       return;
@@ -983,6 +1017,8 @@ export const AdminShellPage = () => {
     )}`;
   }, [dashboard, formatUnixSeconds]);
   const withdrawThresholdAmount = referralDashboard?.withdrawThresholdAmount ?? 10;
+  const inviteRewardMode =
+    referralDashboard?.inviteRewardMode ?? InviteRewardMode.ALLOWLIST;
 
   const userColumns = useMemo<ColumnsType<AdminUserDTO>>(
     () => [
@@ -1077,6 +1113,14 @@ export const AdminShellPage = () => {
         render: (value: number | undefined) => value ?? 0,
       },
       {
+        title: "奖励资格",
+        dataIndex: "referralRewardEligible",
+        key: "referralRewardEligible",
+        width: 100,
+        render: (value: boolean | undefined) =>
+          value ? <Tag color="green">已开通</Tag> : <Tag>未开通</Tag>,
+      },
+      {
         title: "预计奖励",
         dataIndex: "pendingRewardAmount",
         key: "pendingRewardAmount",
@@ -1136,7 +1180,11 @@ export const AdminShellPage = () => {
         render: (_, user) => {
           const netWithdrawableAmount =
             user.netWithdrawableAmount ?? user.availableRewardAmount ?? 0;
-          const canWithdraw = netWithdrawableAmount >= withdrawThresholdAmount;
+          const rewardEligible =
+            inviteRewardMode === InviteRewardMode.PUBLIC ||
+            user.referralRewardEligible === true;
+          const canWithdraw =
+            rewardEligible && netWithdrawableAmount >= withdrawThresholdAmount;
 
           return (
             <Space size={6}>
@@ -1195,6 +1243,22 @@ export const AdminShellPage = () => {
                   ⏱
                 </Button>
               </Tooltip>
+              <Tooltip
+                title={
+                  inviteRewardMode === InviteRewardMode.PUBLIC
+                    ? "当前为全员开放模式（白名单开关仅用于预设）"
+                    : "邀请奖励资格开关"
+                }
+              >
+                <Switch
+                  size="small"
+                  checked={user.referralRewardEligible === true}
+                  loading={updatingReferralEligibilityUserId === user.id}
+                  onChange={(checked) => {
+                    void handleUpdateReferralRewardEligibility(user, checked);
+                  }}
+                />
+              </Tooltip>
               <Popconfirm
                 title="提现可提现奖励"
                 description={`确认给 ${user.username} 提现 ${formatPaymentAmount(netWithdrawableAmount)} 吗？（门槛 ${formatPaymentAmount(withdrawThresholdAmount)}）`}
@@ -1205,7 +1269,7 @@ export const AdminShellPage = () => {
                 }}
                 disabled={!canWithdraw}
               >
-                <Tooltip title="提现">
+                <Tooltip title={rewardEligible ? "提现" : "未开通邀请奖励资格"}>
                   <Button
                     shape="circle"
                     loading={withdrawingUserId === user.id}
@@ -1250,8 +1314,11 @@ export const AdminShellPage = () => {
       handleOpenInviteCodeModal,
       handleOpenRechargeModal,
       handleOpenUpdateModal,
+      handleUpdateReferralRewardEligibility,
       handleResetToken,
       handleWithdrawRewards,
+      inviteRewardMode,
+      updatingReferralEligibilityUserId,
       withdrawingUserId,
       withdrawThresholdAmount,
       formatPaymentAmount,
@@ -1591,6 +1658,16 @@ export const AdminShellPage = () => {
         <Typography.Paragraph
           type="secondary"
           style={{ marginBottom: 0, marginTop: 12 }}
+        >
+          当前邀请奖励模式：
+          {inviteRewardMode === InviteRewardMode.PUBLIC
+            ? "全员开放（public）"
+            : "白名单开通（allowlist）"}
+          。
+        </Typography.Paragraph>
+        <Typography.Paragraph
+          type="secondary"
+          style={{ marginBottom: 0, marginTop: 4 }}
         >
           提现门槛：净可提现金额满 {formatPaymentAmount(withdrawThresholdAmount)} 才可发起提现。
         </Typography.Paragraph>
