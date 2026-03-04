@@ -225,7 +225,7 @@ body {
 .status-history-item {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
 }
 
 .status-history-meta-row {
@@ -240,12 +240,29 @@ body {
   align-items: center;
 }
 
-.status-history-payment {
+.status-history-metric {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #e5e7eb;
+  border-radius: 999px;
+  background: #fafafa;
+  padding: 1px 10px;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.status-history-metric-days {
+  border-color: #dbeafe;
+  background: #eff6ff;
+}
+
+.status-history-metric-payment {
   color: rgba(0, 0, 0, 0.72);
 }
 
 .status-history-expire {
   display: block;
+  font-size: 12px;
 }
 
 .admin-header-card,

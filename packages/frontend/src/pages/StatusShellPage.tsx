@@ -374,10 +374,13 @@ export const StatusShellPage = () => {
                       </Typography.Text>
                     </Space>
                     <Space wrap size={12} className="status-history-metrics-row">
-                      <Typography.Text style={reasonVisual.changeDaysStyle}>
+                      <Typography.Text
+                        className="status-history-metric status-history-metric-days"
+                        style={reasonVisual.changeDaysStyle}
+                      >
                         会员天数：{formatHistoryChangeDays(item)}
                       </Typography.Text>
-                      <Typography.Text className="status-history-payment">
+                      <Typography.Text className="status-history-metric status-history-metric-payment">
                         支付金额：{formatHistoryPaymentAmount(item)}
                       </Typography.Text>
                     </Space>
