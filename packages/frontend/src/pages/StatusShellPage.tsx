@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   MembershipStatus,
   RechargeReason,
@@ -30,25 +30,22 @@ const REASON_LABELS: Record<RechargeReason, string> = {
   [RechargeReason.MANUAL_FIX]: "手动修正",
 };
 
+const REASON_TAG_CLASS_NAMES: Partial<Record<RechargeReason, string>> = {
+  [RechargeReason.WECHAT_PAY]: "status-history-type-tag-wechat",
+  [RechargeReason.ALIPAY]: "status-history-type-tag-alipay",
+  [RechargeReason.PLATFORM_ORDER]: "status-history-type-tag-platform",
+  [RechargeReason.REFERRAL_REWARD]: "status-history-type-tag-reward",
+  [RechargeReason.CAMPAIGN_GIFT]: "status-history-type-tag-gift",
+  [RechargeReason.AFTER_SALES]: "status-history-type-tag-aftersales",
+  [RechargeReason.MANUAL_FIX]: "status-history-type-tag-manual",
+};
+
 interface HistoryReasonVisualConfig {
   timelineColor: string;
-  reasonTagStyle: CSSProperties;
-  changeDaysStyle: CSSProperties;
 }
 
 const DEFAULT_HISTORY_REASON_VISUAL: HistoryReasonVisualConfig = {
   timelineColor: "green",
-  reasonTagStyle: {
-    marginInlineEnd: 0,
-    borderColor: "#d9d9d9",
-    backgroundColor: "#f5f5f5",
-    color: "rgba(0, 0, 0, 0.72)",
-    fontWeight: 600,
-  },
-  changeDaysStyle: {
-    color: "rgba(0, 0, 0, 0.88)",
-    fontWeight: 600,
-  },
 };
 
 const HISTORY_REASON_VISUAL_CONFIG: Partial<
@@ -56,45 +53,12 @@ const HISTORY_REASON_VISUAL_CONFIG: Partial<
 > = {
   [RechargeReason.REFERRAL_REWARD]: {
     timelineColor: "#f59e0b",
-    reasonTagStyle: {
-      marginInlineEnd: 0,
-      borderColor: "#f59e0b",
-      backgroundColor: "#fef3c7",
-      color: "#92400e",
-      fontWeight: 700,
-    },
-    changeDaysStyle: {
-      color: "#b45309",
-      fontWeight: 700,
-    },
   },
   [RechargeReason.CAMPAIGN_GIFT]: {
     timelineColor: "#06b6d4",
-    reasonTagStyle: {
-      marginInlineEnd: 0,
-      borderColor: "#22d3ee",
-      backgroundColor: "#cffafe",
-      color: "#0e7490",
-      fontWeight: 700,
-    },
-    changeDaysStyle: {
-      color: "#0e7490",
-      fontWeight: 700,
-    },
   },
   [RechargeReason.AFTER_SALES]: {
     timelineColor: "#ec4899",
-    reasonTagStyle: {
-      marginInlineEnd: 0,
-      borderColor: "#f9a8d4",
-      backgroundColor: "#fdf2f8",
-      color: "#be185d",
-      fontWeight: 700,
-    },
-    changeDaysStyle: {
-      color: "#be185d",
-      fontWeight: 700,
-    },
   },
 };
 
@@ -121,6 +85,9 @@ const formatHistoryChangeDays = (record: UserStatusHistoryRecordDTO): string =>
 
 const formatHistoryPaymentAmount = (record: UserStatusHistoryRecordDTO): string =>
   record.paymentAmount > 0 ? formatCurrency(record.paymentAmount) : "不涉及支付";
+
+const getHistoryReasonTagClassName = (reason: RechargeReason): string =>
+  REASON_TAG_CLASS_NAMES[reason] ?? "status-history-type-tag-default";
 
 export const StatusShellPage = () => {
   const { token } = useParams<{ token: string }>();
@@ -362,26 +329,29 @@ export const StatusShellPage = () => {
                 color: reasonVisual.timelineColor,
                 children: (
                   <div className="status-history-item">
-                    <Space wrap size={6} className="status-history-meta-row">
-                      <Tag
-                        className="status-history-reason-tag"
-                        style={reasonVisual.reasonTagStyle}
-                      >
-                        {reasonText}
-                      </Tag>
-                      <Typography.Text type="secondary" className="status-history-time">
-                        · {formatUnixSeconds(item.createdAt)}
+                    <Typography.Text type="secondary" className="status-history-time">
+                      {formatUnixSeconds(item.createdAt)}
+                    </Typography.Text>
+                    <Space wrap size={[16, 6]} className="status-history-facts-row">
+                      <Typography.Text className="status-history-fact status-history-fact-type">
+                        <span className="status-history-fact-label">类型</span>
+                        <Tag
+                          className={`status-history-type-tag ${getHistoryReasonTagClassName(item.reason)}`}
+                        >
+                          {reasonText}
+                        </Tag>
                       </Typography.Text>
-                    </Space>
-                    <Space wrap size={12} className="status-history-metrics-row">
-                      <Typography.Text
-                        className="status-history-metric status-history-metric-days"
-                        style={reasonVisual.changeDaysStyle}
-                      >
-                        会员天数：{formatHistoryChangeDays(item)}
+                      <Typography.Text className="status-history-fact">
+                        <span className="status-history-fact-label">天数</span>
+                        <span className="status-history-fact-value status-history-fact-value-days">
+                          {formatHistoryChangeDays(item)}
+                        </span>
                       </Typography.Text>
-                      <Typography.Text className="status-history-metric status-history-metric-payment">
-                        支付金额：{formatHistoryPaymentAmount(item)}
+                      <Typography.Text className="status-history-fact">
+                        <span className="status-history-fact-label">金额</span>
+                        <span className="status-history-fact-value">
+                          {formatHistoryPaymentAmount(item)}
+                        </span>
                       </Typography.Text>
                     </Space>
                     {item.externalNote ? (

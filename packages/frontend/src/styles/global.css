@@ -218,46 +218,106 @@ body {
   margin-top: 16px;
 }
 
-.status-history-reason-tag {
-  margin-inline-end: 0;
-}
-
 .status-history-item {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
-.status-history-meta-row {
+.status-history-time {
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.55);
+}
+
+.status-history-facts-row {
   align-items: center;
 }
 
-.status-history-time {
+.status-history-fact {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  line-height: 1.5;
+}
+
+.status-history-fact-type {
+  align-items: center;
+}
+
+.status-history-fact-label {
+  color: rgba(0, 0, 0, 0.45);
   font-size: 12px;
 }
 
-.status-history-metrics-row {
-  align-items: center;
-}
-
-.status-history-metric {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid #e5e7eb;
-  border-radius: 999px;
-  background: #fafafa;
-  padding: 1px 10px;
-  font-size: 13px;
-  line-height: 20px;
-}
-
-.status-history-metric-days {
-  border-color: #dbeafe;
-  background: #eff6ff;
-}
-
-.status-history-metric-payment {
+.status-history-type-tag.ant-tag {
+  margin-inline-end: 0;
+  border-color: #d1d5db;
+  background: #f5f5f5;
   color: rgba(0, 0, 0, 0.72);
+  border-radius: 999px;
+  padding: 0 8px;
+  line-height: 20px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.status-history-type-tag-default.ant-tag {
+  border-color: #d1d5db;
+  background: #f5f5f5;
+  color: rgba(0, 0, 0, 0.72);
+}
+
+.status-history-type-tag-wechat.ant-tag {
+  border-color: #86efac;
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.status-history-type-tag-alipay.ant-tag {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.status-history-type-tag-platform.ant-tag {
+  border-color: #a7f3d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.status-history-type-tag-reward.ant-tag {
+  border-color: #fcd34d;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.status-history-type-tag-gift.ant-tag {
+  border-color: #67e8f9;
+  background: #ecfeff;
+  color: #0e7490;
+}
+
+.status-history-type-tag-aftersales.ant-tag {
+  border-color: #f9a8d4;
+  background: #fdf2f8;
+  color: #be185d;
+}
+
+.status-history-type-tag-manual.ant-tag {
+  border-color: #d8b4fe;
+  background: #faf5ff;
+  color: #7e22ce;
+}
+
+.status-history-fact-value {
+  color: rgba(0, 0, 0, 0.85);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.status-history-fact-value-days {
+  color: #1d4ed8;
 }
 
 .status-history-expire {
