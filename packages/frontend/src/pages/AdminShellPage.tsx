@@ -1565,6 +1565,12 @@ export const AdminShellPage = () => {
             <Button onClick={() => navigate("/admin/referral-withdrawals")}>
               提现流水
             </Button>
+            <Button onClick={() => navigate("/admin/refund-repair-tasks")}>
+              补偿任务
+            </Button>
+            <Button onClick={() => navigate("/admin/alert-events")}>
+              告警中心
+            </Button>
             <Button onClick={handleLogout} loading={loggingOut}>
               退出登录
             </Button>

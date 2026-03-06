@@ -1,9 +1,11 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import { AdminRouteGuard } from "./components/AdminRouteGuard";
+import { AlertEventsPage } from "./pages/AlertEventsPage";
 import { AdminLoginPage } from "./pages/AdminLoginPage";
 import { AdminShellPage } from "./pages/AdminShellPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
+import { RefundRepairTasksPage } from "./pages/RefundRepairTasksPage";
 import { ReferralRewardsPage } from "./pages/ReferralRewardsPage";
 import { ReferralWithdrawalsPage } from "./pages/ReferralWithdrawalsPage";
 import { StatusShellPage } from "./pages/StatusShellPage";
@@ -35,6 +37,22 @@ const App = () => {
           element={
             <AdminRouteGuard>
               <ReferralWithdrawalsPage />
+            </AdminRouteGuard>
+          }
+        />
+        <Route
+          path="/admin/refund-repair-tasks"
+          element={
+            <AdminRouteGuard>
+              <RefundRepairTasksPage />
+            </AdminRouteGuard>
+          }
+        />
+        <Route
+          path="/admin/alert-events"
+          element={
+            <AdminRouteGuard>
+              <AlertEventsPage />
             </AdminRouteGuard>
           }
         />

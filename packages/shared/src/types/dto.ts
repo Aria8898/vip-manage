@@ -252,6 +252,85 @@ export interface AdminListReferralWithdrawalsResponseDTO {
   limit: number;
 }
 
+export type RefundRepairTaskStatus = "pending" | "resolved";
+
+export type RefundRepairTaskStep =
+  | "rollback"
+  | "referral"
+  | "bonus"
+  | "mark_refund"
+  | "resolved";
+
+export interface AdminRefundRepairTaskDTO {
+  id: string;
+  rechargeRecordId: string;
+  rollbackRecordId: string | null;
+  userId: string;
+  username: string;
+  refundAmount: number;
+  refundNote: string | null;
+  refundedAt: number | null;
+  status: RefundRepairTaskStatus;
+  currentStep: RefundRepairTaskStep;
+  lastError: string;
+  retryCount: number;
+  rollbackAppliedAt: number | null;
+  referralAdjustedAt: number | null;
+  bonusRevokedAt: number | null;
+  refundMarkedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+  resolvedAt: number | null;
+}
+
+export interface AdminListRefundRepairTasksResponseDTO {
+  items: AdminRefundRepairTaskDTO[];
+  limit: number;
+  status: RefundRepairTaskStatus | "all";
+}
+
+export interface AdminRetryRefundRepairTaskResponseDTO {
+  task: AdminRefundRepairTaskDTO;
+  user: UserSummaryDTO & {
+    updatedAt: number;
+  };
+  originalRecord: AdminRechargeRecordDTO;
+  refundRecord: AdminRechargeRecordDTO;
+}
+
+export type AdminAlertSeverity = "warning" | "error";
+
+export type AdminAlertStatus = "open" | "acknowledged";
+
+export interface AdminAlertEventDTO {
+  id: string;
+  severity: AdminAlertSeverity;
+  status: AdminAlertStatus;
+  category: string;
+  title: string;
+  message: string;
+  requestId: string | null;
+  dedupeKey: string | null;
+  detailJson: string | null;
+  occurrenceCount: number;
+  createdAt: number;
+  updatedAt: number;
+  lastOccurredAt: number;
+  acknowledgedAt: number | null;
+  acknowledgedByAdminId: string | null;
+}
+
+export interface AdminListAlertEventsResponseDTO {
+  items: AdminAlertEventDTO[];
+  limit: number;
+  status: AdminAlertStatus | "all";
+  severity: AdminAlertSeverity | "all";
+}
+
+export interface AdminAcknowledgeAlertEventResponseDTO {
+  alert: AdminAlertEventDTO;
+}
+
 export interface AdminWithdrawReferralRewardsRequestDTO {
   inviterUserId: string;
   note?: string;

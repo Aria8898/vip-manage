@@ -11,15 +11,23 @@ import {
   type AdminBindUserReferralRequestDTO,
   type AdminBindUserReferralResponseDTO,
   type AdminBackfillRechargeRequestDTO,
+  type AdminAcknowledgeAlertEventResponseDTO,
+  type AdminAlertEventDTO,
+  type AdminAlertSeverity,
+  type AdminAlertStatus,
   type AdminCreateUserRequestDTO,
   type AdminCreateUserResponseDTO,
+  type AdminListAlertEventsResponseDTO,
   type AdminDashboardTodayDTO,
   type AdminListReferralRewardsResponseDTO,
+  type AdminListRefundRepairTasksResponseDTO,
   type AdminListReferralWithdrawalsResponseDTO,
   type AdminListUserProfileChangeLogsResponseDTO,
   type AdminListRechargeRecordsResponseDTO,
   type AdminRefundRechargeRequestDTO,
   type AdminRefundRechargeResponseDTO,
+  type AdminRefundRepairTaskDTO,
+  type AdminRetryRefundRepairTaskResponseDTO,
   type AdminReferralDashboardDTO,
   type AdminReferralRewardRecordDTO,
   type AdminReferralWithdrawalDTO,
@@ -43,6 +51,8 @@ import {
   type AdminWithdrawReferralRewardsResponseDTO,
   type ApiResponse,
   type HealthDTO,
+  type RefundRepairTaskStatus,
+  type RefundRepairTaskStep,
   type UserStatusHistoryRecordDTO,
   type UserStatusResponseDTO
 } from "@vip/shared";
@@ -54,6 +64,7 @@ import {
   recordFailedLogin
 } from "./lib/login-failure-rate-limit";
 import { verifyPasswordHash } from "./lib/password-hash";
+import { createFixedWindowRateLimiter } from "./lib/request-rate-limit";
 import {
   REFERRAL_BONUS_DAYS,
   bindUserReferral,
@@ -108,6 +119,7 @@ const MAX_EXTERNAL_NOTE_LENGTH = 200;
 const MAX_PROFILE_CHANGE_NOTE_LENGTH = 200;
 const MAX_REFUND_NOTE_LENGTH = 200;
 const MAX_WITHDRAW_NOTE_LENGTH = 200;
+const MAX_REFUND_REPAIR_ERROR_LENGTH = 500;
 const MAX_RECHARGE_DAYS = 3650;
 const MAX_PAYMENT_AMOUNT = 1000000;
 const SYSTEM_INVITE_CODE_LENGTH = 8;
@@ -118,6 +130,16 @@ const UTC8_OFFSET_SECONDS = 8 * 60 * 60;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
 const INVITE_CODE_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const SYSTEM_INVITE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const SAFE_HTTP_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+const REFUND_REPAIR_TASK_STATUSES = new Set<RefundRepairTaskStatus>([
+  "pending",
+  "resolved"
+]);
+const ALERT_EVENT_SEVERITIES = new Set<AdminAlertSeverity>(["warning", "error"]);
+const ALERT_EVENT_STATUSES = new Set<AdminAlertStatus>([
+  "open",
+  "acknowledged"
+]);
 const COMPACT_USER_TOKEN_MARKER = 2;
 const COMPACT_USER_TOKEN_SIGNATURE_BYTES = 16;
 type HttpStatus = 200 | 400 | 401 | 403 | 404 | 409 | 429 | 500;
@@ -193,6 +215,7 @@ interface RechargeRecordRow {
 interface RechargeRecordForRefundRow {
   id: string;
   user_id: string;
+  username?: string;
   reason: string;
   source: string | null;
   change_days: number;
@@ -200,16 +223,72 @@ interface RechargeRecordForRefundRow {
   expire_before: number;
   expire_after: number;
   refunded_at: number | null;
+  refund_amount_cents?: number | null;
+  refund_note?: string | null;
 }
 
 interface RechargeRefundTargetWithUserRow extends RechargeRecordForRefundRow {
   username: string;
 }
 
+interface RechargeRollbackKeyRow {
+  id: string;
+}
+
+interface RechargeRefundStatusRow {
+  refunded_at: number | null;
+}
+
 interface RefundUsageSnapshot {
   usedDays: number;
   refundableDays: number;
   refundableAmountCents: number;
+}
+
+interface RefundRepairTaskRow {
+  id: string;
+  recharge_record_id: string;
+  rollback_record_id: string | null;
+  status: string;
+  current_step: string;
+  intended_refund_days: number | string | null;
+  intended_refund_amount_cents: number | string | null;
+  intended_refund_note: string | null;
+  last_error: string;
+  retry_count: number | string | null;
+  rollback_applied_at: number | null;
+  referral_adjusted_at: number | null;
+  bonus_revoked_at: number | null;
+  refund_marked_at: number | null;
+  created_at: number;
+  updated_at: number;
+  resolved_at: number | null;
+}
+
+interface RefundRepairTaskListRow extends RefundRepairTaskRow {
+  user_id: string;
+  username: string;
+  refunded_at: number | null;
+  refund_amount_cents: number | null;
+  refund_note: string | null;
+}
+
+interface AlertEventRow {
+  id: string;
+  severity: string;
+  status: string;
+  category: string;
+  title: string;
+  message: string;
+  request_id: string | null;
+  dedupe_key: string | null;
+  detail_json: string | null;
+  occurrence_count: number | string | null;
+  created_at: number;
+  updated_at: number;
+  last_occurred_at: number;
+  acknowledged_at: number | null;
+  acknowledged_by_admin_id: string | null;
 }
 
 interface UserProfileChangeLogRow {
@@ -350,11 +429,23 @@ let cachedHasUsersExtraProfileColumns: boolean | null = null;
 let cachedHasRechargeTimelineColumns: boolean | null = null;
 let cachedHasRechargeExternalNoteColumn: boolean | null = null;
 let cachedHasRechargeRefundColumns: boolean | null = null;
+let cachedHasRechargeRollbackKeyColumn: boolean | null = null;
 let cachedHasReferralTables: boolean | null = null;
 let cachedHasReferralDailyUnlockColumns: boolean | null = null;
 let cachedHasUsersInviteCodeColumn: boolean | null = null;
 let cachedHasInviteAliasesTable: boolean | null = null;
 let cachedHasUsersReferralRewardEligibilityColumn: boolean | null = null;
+let cachedHasRefundRepairTasksTable: boolean | null = null;
+let cachedHasRefundRepairTaskStageColumns: boolean | null = null;
+let cachedHasAlertEventsTable: boolean | null = null;
+const statusReadRateLimiter = createFixedWindowRateLimiter({
+  maxRequests: 60,
+  windowSeconds: 60
+});
+const adminWriteRateLimiter = createFixedWindowRateLimiter({
+  maxRequests: 120,
+  windowSeconds: 60
+});
 
 const getCurrentTimestamp = (): number => Math.floor(Date.now() / 1000);
 
@@ -395,6 +486,33 @@ const getClientIp = (request: Request): string => {
   }
 
   return "unknown";
+};
+
+const isSafeHttpMethod = (method: string): boolean =>
+  SAFE_HTTP_METHODS.has(method.toUpperCase());
+
+const isSameOrigin = (targetUrl: string, requestUrl: string): boolean => {
+  try {
+    const target = new URL(targetUrl);
+    const request = new URL(requestUrl);
+    return target.protocol === request.protocol && target.host === request.host;
+  } catch {
+    return false;
+  }
+};
+
+const hasAllowedAdminWriteOrigin = (request: Request): boolean => {
+  const origin = request.headers.get("origin");
+  if (origin) {
+    return isSameOrigin(origin, request.url);
+  }
+
+  const referer = request.headers.get("referer");
+  if (referer) {
+    return isSameOrigin(referer, request.url);
+  }
+
+  return false;
 };
 
 const shouldUseSecureCookie = (request: Request, env: Bindings): boolean => {
@@ -705,6 +823,18 @@ const hasRechargeRefundColumns = async (db: D1Database): Promise<boolean> => {
   return hasColumns;
 };
 
+const hasRechargeRollbackKeyColumn = async (db: D1Database): Promise<boolean> => {
+  if (cachedHasRechargeRollbackKeyColumn !== null) {
+    return cachedHasRechargeRollbackKeyColumn;
+  }
+
+  const rows = await db.prepare("PRAGMA table_info(recharge_records)").all<SqliteTableInfoRow>();
+  const hasColumn = (rows.results || []).some((row) => row.name === "rollback_key");
+  cachedHasRechargeRollbackKeyColumn = hasColumn;
+
+  return hasColumn;
+};
+
 const hasReferralTables = async (db: D1Database): Promise<boolean> => {
   if (cachedHasReferralTables !== null) {
     return cachedHasReferralTables;
@@ -764,6 +894,65 @@ const hasReferralDailyUnlockColumns = async (db: D1Database): Promise<boolean> =
     withdrawalColumns.has("debt_offset_cents");
   cachedHasReferralDailyUnlockColumns = hasWithdrawalColumns;
   return hasWithdrawalColumns;
+};
+
+const hasRefundRepairTasksTable = async (db: D1Database): Promise<boolean> => {
+  if (cachedHasRefundRepairTasksTable !== null) {
+    return cachedHasRefundRepairTasksTable;
+  }
+
+  const row = await db
+    .prepare(
+      `SELECT name
+       FROM sqlite_master
+       WHERE type = 'table' AND name = 'refund_repair_tasks'
+       LIMIT 1`
+    )
+    .first<SqliteTableInfoRow>();
+  cachedHasRefundRepairTasksTable = Boolean(row?.name);
+
+  return cachedHasRefundRepairTasksTable;
+};
+
+const hasRefundRepairTaskStageColumns = async (db: D1Database): Promise<boolean> => {
+  if (cachedHasRefundRepairTaskStageColumns !== null) {
+    return cachedHasRefundRepairTaskStageColumns;
+  }
+
+  const rows = await db
+    .prepare("PRAGMA table_info(refund_repair_tasks)")
+    .all<SqliteTableInfoRow>();
+  const columnNames = new Set((rows.results || []).map((row) => row.name));
+  const hasColumns =
+    columnNames.has("current_step") &&
+    columnNames.has("intended_refund_days") &&
+    columnNames.has("intended_refund_amount_cents") &&
+    columnNames.has("intended_refund_note") &&
+    columnNames.has("rollback_applied_at") &&
+    columnNames.has("referral_adjusted_at") &&
+    columnNames.has("bonus_revoked_at") &&
+    columnNames.has("refund_marked_at");
+  cachedHasRefundRepairTaskStageColumns = hasColumns;
+
+  return hasColumns;
+};
+
+const hasAlertEventsTable = async (db: D1Database): Promise<boolean> => {
+  if (cachedHasAlertEventsTable !== null) {
+    return cachedHasAlertEventsTable;
+  }
+
+  const row = await db
+    .prepare(
+      `SELECT name
+       FROM sqlite_master
+       WHERE type = 'table' AND name = 'alert_events'
+       LIMIT 1`
+    )
+    .first<SqliteTableInfoRow>();
+  cachedHasAlertEventsTable = Boolean(row?.name);
+
+  return cachedHasAlertEventsTable;
 };
 
 const normalizeInternalNote = (value: unknown): string | null => {
@@ -1094,6 +1283,346 @@ const calculateRefundUsageSnapshot = (
   };
 };
 
+const buildRefundRollbackKey = (
+  rechargeRecordId: string,
+  stage: "main" | "bonus"
+): string => `refund:${rechargeRecordId}:${stage}`;
+
+const getRefundRepairTaskByRechargeRecordId = async (
+  db: D1Database,
+  rechargeRecordId: string
+): Promise<RefundRepairTaskListRow | null> =>
+  db
+    .prepare(
+      `SELECT
+        t.id,
+        t.recharge_record_id,
+        t.rollback_record_id,
+        t.status,
+        t.current_step,
+        t.intended_refund_days,
+        t.intended_refund_amount_cents,
+        t.intended_refund_note,
+        t.last_error,
+        t.retry_count,
+        t.rollback_applied_at,
+        t.referral_adjusted_at,
+        t.bonus_revoked_at,
+        t.refund_marked_at,
+        t.created_at,
+        t.updated_at,
+        t.resolved_at,
+        r.user_id,
+        u.username,
+        r.refunded_at,
+        r.refund_amount_cents,
+        r.refund_note
+       FROM refund_repair_tasks AS t
+       INNER JOIN recharge_records AS r ON r.id = t.recharge_record_id
+       INNER JOIN users AS u ON u.id = r.user_id
+       WHERE t.recharge_record_id = ?
+       LIMIT 1`
+    )
+    .bind(rechargeRecordId)
+    .first<RefundRepairTaskListRow>();
+
+const emitAlertEvent = async (
+  db: D1Database,
+  params: {
+    severity: AdminAlertSeverity;
+    category: string;
+    title: string;
+    message: string;
+    requestId?: string | null;
+    dedupeKey?: string | null;
+    detail?: Record<string, unknown> | null;
+    now: number;
+  }
+): Promise<void> => {
+  if (!(await hasAlertEventsTable(db))) {
+    return;
+  }
+
+  const detailJson = params.detail ? JSON.stringify(params.detail) : null;
+  await db
+    .prepare(
+      `INSERT INTO alert_events (
+        id,
+        severity,
+        status,
+        category,
+        title,
+        message,
+        request_id,
+        dedupe_key,
+        detail_json,
+        occurrence_count,
+        created_at,
+        updated_at,
+        last_occurred_at,
+        acknowledged_at,
+        acknowledged_by_admin_id
+      ) VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, NULL, NULL)
+      ON CONFLICT(dedupe_key) DO UPDATE SET
+        severity = excluded.severity,
+        status = 'open',
+        category = excluded.category,
+        title = excluded.title,
+        message = excluded.message,
+        request_id = excluded.request_id,
+        detail_json = excluded.detail_json,
+        occurrence_count = alert_events.occurrence_count + 1,
+        updated_at = excluded.updated_at,
+        last_occurred_at = excluded.last_occurred_at,
+        acknowledged_at = NULL,
+        acknowledged_by_admin_id = NULL`
+    )
+    .bind(
+      crypto.randomUUID(),
+      params.severity,
+      params.category,
+      params.title,
+      params.message,
+      params.requestId ?? null,
+      params.dedupeKey ?? null,
+      detailJson,
+      params.now,
+      params.now,
+      params.now
+    )
+    .run();
+};
+
+const emitAlertEventSafe = async (
+  db: D1Database,
+  params: Parameters<typeof emitAlertEvent>[1]
+): Promise<void> => {
+  try {
+    await emitAlertEvent(db, params);
+  } catch (error) {
+    console.error("emit alert event failed", error);
+  }
+};
+
+const toRefundRepairErrorMessage = (error: unknown): string => {
+  if (error instanceof Error && error.message) {
+    return error.message.slice(0, MAX_REFUND_REPAIR_ERROR_LENGTH);
+  }
+
+  if (typeof error === "string" && error.trim()) {
+    return error.trim().slice(0, MAX_REFUND_REPAIR_ERROR_LENGTH);
+  }
+
+  try {
+    const serialized = JSON.stringify(error);
+    if (serialized) {
+      return serialized.slice(0, MAX_REFUND_REPAIR_ERROR_LENGTH);
+    }
+  } catch {
+    // ignore serialization error
+  }
+
+  return "unknown refund processing error";
+};
+
+const beginRefundRepairTaskAttempt = async (
+  db: D1Database,
+  params: {
+    rechargeRecordId: string;
+    intendedRefundDays: number;
+    intendedRefundAmountCents: number;
+    intendedRefundNote: string | null;
+    now: number;
+  }
+): Promise<RefundRepairTaskListRow | null> => {
+  if (!(await hasRefundRepairTasksTable(db))) {
+    return null;
+  }
+
+  await db
+    .prepare(
+      `INSERT INTO refund_repair_tasks (
+        id,
+        recharge_record_id,
+        status,
+        current_step,
+        intended_refund_days,
+        intended_refund_amount_cents,
+        intended_refund_note,
+        last_error,
+        retry_count,
+        rollback_applied_at,
+        referral_adjusted_at,
+        bonus_revoked_at,
+        refund_marked_at,
+        created_at,
+        updated_at,
+        resolved_at
+      ) VALUES (?, ?, 'pending', 'rollback', ?, ?, ?, '', 1, NULL, NULL, NULL, NULL, ?, ?, NULL)
+      ON CONFLICT(recharge_record_id) DO UPDATE SET
+        status = 'pending',
+        intended_refund_days = CASE
+          WHEN refund_repair_tasks.intended_refund_days > 0
+          THEN refund_repair_tasks.intended_refund_days
+          ELSE excluded.intended_refund_days
+        END,
+        intended_refund_amount_cents = CASE
+          WHEN refund_repair_tasks.intended_refund_amount_cents > 0
+          THEN refund_repair_tasks.intended_refund_amount_cents
+          ELSE excluded.intended_refund_amount_cents
+        END,
+        intended_refund_note = COALESCE(
+          refund_repair_tasks.intended_refund_note,
+          excluded.intended_refund_note
+        ),
+        last_error = '',
+        retry_count = refund_repair_tasks.retry_count + 1,
+        updated_at = excluded.updated_at,
+        resolved_at = NULL`
+    )
+    .bind(
+      crypto.randomUUID(),
+      params.rechargeRecordId,
+      params.intendedRefundDays,
+      params.intendedRefundAmountCents,
+      params.intendedRefundNote,
+      params.now,
+      params.now
+    )
+    .run();
+
+  return getRefundRepairTaskByRechargeRecordId(db, params.rechargeRecordId);
+};
+
+const advanceRefundRepairTask = async (
+  db: D1Database,
+  params: {
+    rechargeRecordId: string;
+    nextStep: RefundRepairTaskStep;
+    now: number;
+    rollbackRecordId?: string | null;
+  }
+): Promise<void> => {
+  if (!(await hasRefundRepairTasksTable(db))) {
+    return;
+  }
+
+  if (params.nextStep === "referral") {
+    await db
+      .prepare(
+        `UPDATE refund_repair_tasks
+         SET rollback_record_id = COALESCE(?, rollback_record_id),
+             rollback_applied_at = COALESCE(rollback_applied_at, ?),
+             current_step = 'referral',
+             updated_at = ?
+         WHERE recharge_record_id = ?`
+      )
+      .bind(
+        params.rollbackRecordId ?? null,
+        params.now,
+        params.now,
+        params.rechargeRecordId
+      )
+      .run();
+    return;
+  }
+
+  if (params.nextStep === "bonus") {
+    await db
+      .prepare(
+        `UPDATE refund_repair_tasks
+         SET referral_adjusted_at = COALESCE(referral_adjusted_at, ?),
+             current_step = 'bonus',
+             updated_at = ?
+         WHERE recharge_record_id = ?`
+      )
+      .bind(params.now, params.now, params.rechargeRecordId)
+      .run();
+    return;
+  }
+
+  if (params.nextStep === "mark_refund") {
+    await db
+      .prepare(
+        `UPDATE refund_repair_tasks
+         SET bonus_revoked_at = COALESCE(bonus_revoked_at, ?),
+             current_step = 'mark_refund',
+             updated_at = ?
+         WHERE recharge_record_id = ?`
+      )
+      .bind(params.now, params.now, params.rechargeRecordId)
+      .run();
+    return;
+  }
+
+  await db
+    .prepare(
+      `UPDATE refund_repair_tasks
+       SET refund_marked_at = COALESCE(refund_marked_at, ?),
+           current_step = 'resolved',
+           updated_at = ?
+       WHERE recharge_record_id = ?`
+    )
+    .bind(params.now, params.now, params.rechargeRecordId)
+    .run();
+};
+
+const failRefundRepairTask = async (
+  db: D1Database,
+  params: {
+    rechargeRecordId: string;
+    now: number;
+    errorMessage: string;
+  }
+): Promise<void> => {
+  if (!(await hasRefundRepairTasksTable(db))) {
+    return;
+  }
+
+  await db
+    .prepare(
+      `UPDATE refund_repair_tasks
+       SET status = 'pending',
+           last_error = ?,
+           updated_at = ?,
+           resolved_at = NULL
+       WHERE recharge_record_id = ?`
+    )
+    .bind(
+      params.errorMessage.slice(0, MAX_REFUND_REPAIR_ERROR_LENGTH),
+      params.now,
+      params.rechargeRecordId
+    )
+    .run();
+};
+
+const resolveRefundRepairTask = async (
+  db: D1Database,
+  params: {
+    rechargeRecordId: string;
+    rollbackRecordId: string | null;
+    now: number;
+  }
+): Promise<void> => {
+  if (!(await hasRefundRepairTasksTable(db))) {
+    return;
+  }
+
+  await db
+    .prepare(
+      `UPDATE refund_repair_tasks
+       SET rollback_record_id = COALESCE(?, rollback_record_id),
+           status = 'resolved',
+           current_step = 'resolved',
+           last_error = '',
+           updated_at = ?,
+           resolved_at = ?
+       WHERE recharge_record_id = ?`
+    )
+    .bind(params.rollbackRecordId, params.now, params.now, params.rechargeRecordId)
+    .run();
+};
+
 const isUserProfileChangeField = (value: string): value is UserProfileChangeField => {
   return (
     value === UserProfileChangeField.SYSTEM_EMAIL ||
@@ -1130,6 +1659,36 @@ const toRechargeRecordSource = (value: string | null | undefined): RechargeRecor
       : value === RechargeRecordSource.REFUND_ROLLBACK
         ? RechargeRecordSource.REFUND_ROLLBACK
         : RechargeRecordSource.NORMAL;
+
+const toRefundRepairTaskStatus = (
+  value: string | null | undefined
+): RefundRepairTaskStatus =>
+  value === "resolved" ? "resolved" : "pending";
+
+const toAlertEventSeverity = (
+  value: string | null | undefined
+): AdminAlertSeverity =>
+  value === "warning" ? "warning" : "error";
+
+const toAlertEventStatus = (value: string | null | undefined): AdminAlertStatus =>
+  value === "acknowledged" ? "acknowledged" : "open";
+
+const toRefundRepairTaskStep = (value: string | null | undefined): RefundRepairTaskStep => {
+  if (value === "referral") {
+    return "referral";
+  }
+  if (value === "bonus") {
+    return "bonus";
+  }
+  if (value === "mark_refund") {
+    return "mark_refund";
+  }
+  if (value === "resolved") {
+    return "resolved";
+  }
+
+  return "rollback";
+};
 
 const toReferralRewardStatus = (value: string): ReferralRewardStatus => {
   if (value === ReferralRewardStatus.PENDING) {
@@ -1176,6 +1735,50 @@ const toAdminRechargeRecordDTO = (row: RechargeRecordRow): AdminRechargeRecordDT
   refundAmount: toPaymentAmount(row.refund_amount_cents),
   refundNote: row.refund_note ?? null,
   createdAt: row.created_at
+});
+
+const toAdminRefundRepairTaskDTO = (
+  row: RefundRepairTaskListRow
+): AdminRefundRepairTaskDTO => ({
+  id: row.id,
+  rechargeRecordId: row.recharge_record_id,
+  rollbackRecordId: row.rollback_record_id ?? null,
+  userId: row.user_id,
+  username: row.username,
+  refundAmount: toPaymentAmount(
+    row.refund_amount_cents ?? toNonNegativeInt(row.intended_refund_amount_cents)
+  ),
+  refundNote: row.refund_note ?? row.intended_refund_note ?? null,
+  refundedAt: row.refunded_at ?? null,
+  status: toRefundRepairTaskStatus(row.status),
+  currentStep: toRefundRepairTaskStep(row.current_step),
+  lastError: row.last_error || "",
+  retryCount: toNonNegativeInt(row.retry_count),
+  rollbackAppliedAt: row.rollback_applied_at ?? null,
+  referralAdjustedAt: row.referral_adjusted_at ?? null,
+  bonusRevokedAt: row.bonus_revoked_at ?? null,
+  refundMarkedAt: row.refund_marked_at ?? null,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+  resolvedAt: row.resolved_at ?? null
+});
+
+const toAdminAlertEventDTO = (row: AlertEventRow): AdminAlertEventDTO => ({
+  id: row.id,
+  severity: toAlertEventSeverity(row.severity),
+  status: toAlertEventStatus(row.status),
+  category: row.category,
+  title: row.title,
+  message: row.message,
+  requestId: row.request_id ?? null,
+  dedupeKey: row.dedupe_key ?? null,
+  detailJson: row.detail_json ?? null,
+  occurrenceCount: toNonNegativeInt(row.occurrence_count),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+  lastOccurredAt: row.last_occurred_at,
+  acknowledgedAt: row.acknowledged_at ?? null,
+  acknowledgedByAdminId: row.acknowledged_by_admin_id ?? null
 });
 
 const toAdminReferralRewardRecordDTO = (
@@ -1318,6 +1921,50 @@ const requireRechargeRefundColumns = async (
   return { ok: true };
 };
 
+const requireRechargeRefundReliabilitySupport = async (
+  c: AppContext
+): Promise<{ ok: true } | { ok: false; response: Response }> => {
+  const hasRollbackKeyColumn = await hasRechargeRollbackKeyColumn(c.env.DB);
+  if (!hasRollbackKeyColumn) {
+    return {
+      ok: false,
+      response: fail(c, 500, "database migration required: recharge_records.rollback_key column missing")
+    };
+  }
+
+  const hasRepairTaskTable = await hasRefundRepairTasksTable(c.env.DB);
+  if (!hasRepairTaskTable) {
+    return {
+      ok: false,
+      response: fail(c, 500, "database migration required: refund_repair_tasks table missing")
+    };
+  }
+
+  const hasRepairTaskStageColumns = await hasRefundRepairTaskStageColumns(c.env.DB);
+  if (!hasRepairTaskStageColumns) {
+    return {
+      ok: false,
+      response: fail(c, 500, "database migration required: refund_repair_tasks stage columns missing")
+    };
+  }
+
+  return { ok: true };
+};
+
+const requireAlertEventSupport = async (
+  c: AppContext
+): Promise<{ ok: true } | { ok: false; response: Response }> => {
+  const hasTable = await hasAlertEventsTable(c.env.DB);
+  if (!hasTable) {
+    return {
+      ok: false,
+      response: fail(c, 500, "database migration required: alert_events table missing")
+    };
+  }
+
+  return { ok: true };
+};
+
 const requireReferralTables = async (
   c: AppContext
 ): Promise<{ ok: true } | { ok: false; response: Response }> => {
@@ -1432,10 +2079,12 @@ const createAndRebuildRechargeRecord = async (
     externalNote: string | null;
     occurredAt: number;
     source: RechargeRecordSource;
+    rollbackKey?: string;
   }
 ): Promise<AdminRechargeUserResponseDTO | null> => {
   const session = c.get("adminSession");
   const now = getCurrentTimestamp();
+  const hasRollbackKeyColumn = await hasRechargeRollbackKeyColumn(c.env.DB);
 
   const user = await c.env.DB.prepare(
     "SELECT id, username, expire_at, updated_at FROM users WHERE id = ? LIMIT 1"
@@ -1446,40 +2095,81 @@ const createAndRebuildRechargeRecord = async (
     return null;
   }
 
-  const recordId = crypto.randomUUID();
+  if (params.rollbackKey && hasRollbackKeyColumn) {
+    const existingRecord = await c.env.DB
+      .prepare(
+        `SELECT id
+         FROM recharge_records
+         WHERE rollback_key = ?
+         LIMIT 1`
+      )
+      .bind(params.rollbackKey)
+      .first<RechargeRollbackKeyRow>();
+    if (existingRecord?.id) {
+      const finalExpireAt = await rebuildUserRechargeChain(c.env.DB, params.userId, now);
+      const existingRow = await getRechargeRecordById(c.env.DB, existingRecord.id);
+      if (!existingRow) {
+        throw new Error("existing rollback recharge record not found");
+      }
+
+      return {
+        user: {
+          id: user.id,
+          username: user.username,
+          expireAt: finalExpireAt,
+          updatedAt: now
+        },
+        record: toAdminRechargeRecordDTO(existingRow)
+      };
+    }
+  }
+
+  const insertColumns = [
+    "id",
+    "user_id",
+    "change_days",
+    "reason",
+    "payment_amount_cents",
+    "internal_note",
+    "external_note",
+    "expire_before",
+    "expire_after",
+    "operator_admin_id",
+    "created_at",
+    "occurred_at",
+    "recorded_at",
+    "source"
+  ];
+  const insertValues: Array<string | number | null> = [
+    crypto.randomUUID(),
+    params.userId,
+    params.days,
+    params.reason,
+    params.paymentAmountCents,
+    params.internalNote,
+    params.externalNote,
+    0,
+    0,
+    session.adminId,
+    now,
+    params.occurredAt,
+    now,
+    params.source
+  ];
+  if (hasRollbackKeyColumn) {
+    insertColumns.push("rollback_key");
+    insertValues.push(params.rollbackKey ?? null);
+  }
+
   await c.env.DB.prepare(
     `INSERT INTO recharge_records (
-      id,
-      user_id,
-      change_days,
-      reason,
-      payment_amount_cents,
-      internal_note,
-      external_note,
-      expire_before,
-      expire_after,
-      operator_admin_id,
-      created_at,
-      occurred_at,
-      recorded_at,
-      source
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)`
+      ${insertColumns.join(", ")}
+    ) VALUES (${insertColumns.map(() => "?").join(", ")})`
   )
-    .bind(
-      recordId,
-      params.userId,
-      params.days,
-      params.reason,
-      params.paymentAmountCents,
-      params.internalNote,
-      params.externalNote,
-      session.adminId,
-      now,
-      params.occurredAt,
-      now,
-      params.source
-    )
+    .bind(...insertValues)
     .run();
+
+  const recordId = String(insertValues[0]);
 
   const finalExpireAt = await rebuildUserRechargeChain(c.env.DB, params.userId, now);
   const insertedRow = await c.env.DB.prepare(
@@ -1562,6 +2252,244 @@ const getRechargeRecordById = async (
     )
     .bind(recordId)
     .first<RechargeRecordRow>();
+
+const getRechargeRefundTargetById = async (
+  db: D1Database,
+  rechargeRecordId: string
+): Promise<RechargeRefundTargetWithUserRow | null> =>
+  db
+    .prepare(
+      `SELECT
+        r.id,
+        r.user_id,
+        u.username,
+        r.reason,
+        r.source,
+        r.change_days,
+        r.payment_amount_cents,
+        r.expire_before,
+        r.expire_after,
+        r.refunded_at,
+        r.refund_amount_cents,
+        r.refund_note
+       FROM recharge_records AS r
+       INNER JOIN users AS u ON u.id = r.user_id
+       WHERE r.id = ?
+       LIMIT 1`
+    )
+    .bind(rechargeRecordId)
+    .first<RechargeRefundTargetWithUserRow>();
+
+const processRefundRepair = async (
+  c: AppContext,
+  params: {
+    target: RechargeRefundTargetWithUserRow;
+    requestedRefundAmount: number | null;
+    requestedRefundNote: string | null;
+  }
+): Promise<AdminRetryRefundRepairTaskResponseDTO> => {
+  if ((params.target.change_days || 0) <= 0) {
+    throw new Error("only positive recharge records can be refunded");
+  }
+  if (params.target.source === RechargeRecordSource.REFUND_ROLLBACK) {
+    throw new Error("refund rollback records cannot be refunded again");
+  }
+
+  const now = getCurrentTimestamp();
+  const existingTask = await getRefundRepairTaskByRechargeRecordId(
+    c.env.DB,
+    params.target.id
+  );
+  const refundUsage = calculateRefundUsageSnapshot(params.target, now);
+  const intendedRefundDays =
+    toNonNegativeInt(existingTask?.intended_refund_days) ||
+    refundUsage.refundableDays;
+  if (intendedRefundDays <= 0) {
+    throw new Error("no refundable days left for this recharge record");
+  }
+  const intendedRefundAmountCents =
+    toNonNegativeInt(existingTask?.intended_refund_amount_cents) ||
+    toNonNegativeInt(params.target.refund_amount_cents) ||
+    refundUsage.refundableAmountCents;
+  if (intendedRefundAmountCents <= 0) {
+    throw new Error("no refundable days left for this recharge record");
+  }
+
+  const intendedRefundAmount = toPaymentAmount(intendedRefundAmountCents);
+  if (params.requestedRefundAmount !== null) {
+    const requestedRefundAmount = Number(params.requestedRefundAmount.toFixed(2));
+    if (requestedRefundAmount !== intendedRefundAmount) {
+      throw new Error(
+        `refundAmount must equal ${intendedRefundAmount.toFixed(2)} under remaining-days refund rule`
+      );
+    }
+  }
+
+  const intendedRefundNote =
+    existingTask?.intended_refund_note ??
+    params.target.refund_note ??
+    params.requestedRefundNote;
+  let task = await beginRefundRepairTaskAttempt(c.env.DB, {
+    rechargeRecordId: params.target.id,
+    intendedRefundDays,
+    intendedRefundAmountCents,
+    intendedRefundNote,
+    now
+  });
+  if (!task) {
+    throw new Error("refund repair task unavailable");
+  }
+
+  let rollbackPayload: AdminRechargeUserResponseDTO | null = null;
+  try {
+    rollbackPayload = await createAndRebuildRechargeRecord(c, {
+      userId: params.target.user_id,
+      days: -Math.abs(intendedRefundDays),
+      reason: RechargeReason.MANUAL_FIX,
+      paymentAmountCents: 0,
+      internalNote: `refund rollback for recharge record ${params.target.id}`,
+      externalNote: "退款回滚会员天数",
+      occurredAt: now,
+      source: RechargeRecordSource.REFUND_ROLLBACK,
+      rollbackKey: buildRefundRollbackKey(params.target.id, "main")
+    });
+    if (!rollbackPayload) {
+      throw new Error("target user not found");
+    }
+
+    if (!task.rollback_applied_at) {
+      await advanceRefundRepairTask(c.env.DB, {
+        rechargeRecordId: params.target.id,
+        nextStep: "referral",
+        now,
+        rollbackRecordId: rollbackPayload.record.id
+      });
+      task = (await getRefundRepairTaskByRechargeRecordId(
+        c.env.DB,
+        params.target.id
+      )) ?? task;
+    }
+
+    if (!task.referral_adjusted_at) {
+      await cancelReferralRewardsByRechargeRecord(c.env.DB, {
+        rechargeRecordId: params.target.id,
+        refundAmountCents: intendedRefundAmountCents,
+        reason: "recharge refunded",
+        now
+      });
+      await advanceRefundRepairTask(c.env.DB, {
+        rechargeRecordId: params.target.id,
+        nextStep: "bonus",
+        now
+      });
+      task = (await getRefundRepairTaskByRechargeRecordId(
+        c.env.DB,
+        params.target.id
+      )) ?? task;
+    }
+
+    if (!task.bonus_revoked_at) {
+      const bonusGrant = await findGrantedBonusByTriggerRechargeRecord(
+        c.env.DB,
+        params.target.id
+      );
+      if (bonusGrant) {
+        const bonusRollback = await createAndRebuildRechargeRecord(c, {
+          userId: bonusGrant.invitee_user_id,
+          days: -Math.abs(bonusGrant.bonus_days),
+          reason: RechargeReason.MANUAL_FIX,
+          paymentAmountCents: 0,
+          internalNote: `revoke invite bonus for refunded recharge ${params.target.id}`,
+          externalNote: "退款撤销邀请首单赠送",
+          occurredAt: now,
+          source: RechargeRecordSource.REFUND_ROLLBACK,
+          rollbackKey: buildRefundRollbackKey(params.target.id, "bonus")
+        });
+        if (bonusRollback) {
+          await markBonusGrantRevoked(c.env.DB, {
+            bonusGrantId: bonusGrant.id,
+            revokeRechargeRecordId: bonusRollback.record.id,
+            now
+          });
+        }
+      }
+
+      await advanceRefundRepairTask(c.env.DB, {
+        rechargeRecordId: params.target.id,
+        nextStep: "mark_refund",
+        now
+      });
+      task = (await getRefundRepairTaskByRechargeRecordId(
+        c.env.DB,
+        params.target.id
+      )) ?? task;
+    }
+
+    if (!task.refund_marked_at) {
+      if (!(params.target.refunded_at && params.target.refunded_at > 0)) {
+        const session = c.get("adminSession");
+        const markResult = await c.env.DB
+          .prepare(
+            `UPDATE recharge_records
+             SET refunded_at = ?, refund_note = ?, refunded_by_admin_id = ?, refund_amount_cents = ?
+             WHERE id = ? AND refunded_at IS NULL`
+          )
+          .bind(
+            now,
+            intendedRefundNote,
+            session.adminId,
+            intendedRefundAmountCents,
+            params.target.id
+          )
+          .run();
+        if (Number(markResult.meta?.changes || 0) === 0) {
+          const refundStatus = await c.env.DB
+            .prepare("SELECT refunded_at FROM recharge_records WHERE id = ? LIMIT 1")
+            .bind(params.target.id)
+            .first<RechargeRefundStatusRow>();
+          if (!refundStatus?.refunded_at || refundStatus.refunded_at <= 0) {
+            throw new Error("failed to mark recharge record as refunded");
+          }
+        }
+      }
+
+      await advanceRefundRepairTask(c.env.DB, {
+        rechargeRecordId: params.target.id,
+        nextStep: "resolved",
+        now
+      });
+    }
+
+    await resolveRefundRepairTask(c.env.DB, {
+      rechargeRecordId: params.target.id,
+      rollbackRecordId: rollbackPayload.record.id,
+      now
+    });
+
+    const taskRow = await getRefundRepairTaskByRechargeRecordId(
+      c.env.DB,
+      params.target.id
+    );
+    const originalRecord = await getRechargeRecordById(c.env.DB, params.target.id);
+    if (!taskRow || !originalRecord) {
+      throw new Error("refund repair result not found");
+    }
+
+    return {
+      task: toAdminRefundRepairTaskDTO(taskRow),
+      user: rollbackPayload.user,
+      originalRecord: toAdminRechargeRecordDTO(originalRecord),
+      refundRecord: rollbackPayload.record
+    };
+  } catch (error) {
+    await failRefundRepairTask(c.env.DB, {
+      rechargeRecordId: params.target.id,
+      now: getCurrentTimestamp(),
+      errorMessage: toRefundRepairErrorMessage(error)
+    });
+    throw error;
+  }
+};
 
 const applyReferralEffectsForRecharge = async (
   c: AppContext,
@@ -1668,7 +2596,14 @@ const fail = (
 
 app.use("*", async (c, next) => {
   c.set("requestId", createRequestId(c.req.raw));
+  c.header("Referrer-Policy", "no-referrer");
+  c.header("X-Content-Type-Options", "nosniff");
+  if (c.req.path.startsWith("/api/")) {
+    c.header("Cache-Control", "private, no-store");
+  }
+
   await next();
+  c.header("X-Request-Id", c.get("requestId"));
 });
 
 app.use("/api/admin/*", async (c, next) => {
@@ -1703,6 +2638,53 @@ app.use("/api/admin/*", async (c, next) => {
     deleteCookie(c, ADMIN_SESSION_COOKIE, { path: "/" });
     return fail(c, 401, "unauthorized");
   }
+});
+
+app.use("/api/status/*", async (c, next) => {
+  const now = getCurrentTimestamp();
+  const clientIp = getClientIp(c.req.raw);
+  const limitStatus = statusReadRateLimiter.check(clientIp, now);
+  c.header("X-RateLimit-Limit", String(limitStatus.limit));
+  c.header("X-RateLimit-Remaining", String(limitStatus.remaining));
+  c.header("X-RateLimit-Window", String(limitStatus.windowSeconds));
+  if (limitStatus.blocked) {
+    c.header("Retry-After", String(limitStatus.retryAfterSeconds));
+    return fail(c, 429, "too many requests");
+  }
+
+  await next();
+});
+
+app.use("/api/admin/*", async (c, next) => {
+  if (c.req.path === "/api/admin/login") {
+    await next();
+    return;
+  }
+
+  if (isSafeHttpMethod(c.req.method)) {
+    await next();
+    return;
+  }
+
+  if (!hasAllowedAdminWriteOrigin(c.req.raw)) {
+    return fail(c, 403, "forbidden origin");
+  }
+
+  const session = c.get("adminSession");
+  const now = getCurrentTimestamp();
+  const limitKey = session?.adminId
+    ? `admin:${session.adminId}`
+    : `ip:${getClientIp(c.req.raw)}`;
+  const limitStatus = adminWriteRateLimiter.check(limitKey, now);
+  c.header("X-RateLimit-Limit", String(limitStatus.limit));
+  c.header("X-RateLimit-Remaining", String(limitStatus.remaining));
+  c.header("X-RateLimit-Window", String(limitStatus.windowSeconds));
+  if (limitStatus.blocked) {
+    c.header("Retry-After", String(limitStatus.retryAfterSeconds));
+    return fail(c, 429, "too many write requests, please retry later");
+  }
+
+  await next();
 });
 
 app.get("/api/health", (c) => {
@@ -2896,11 +3878,39 @@ app.post("/api/admin/users/:id/recharge", async (c) => {
         occurredAt: now
       });
     } catch (error) {
+      await emitAlertEventSafe(c.env.DB, {
+        severity: "warning",
+        category: "referral_side_effect",
+        title: "充值后邀请奖励联动失败",
+        message: "充值已成功，但邀请奖励联动处理失败，需要人工复核。",
+        requestId: c.get("requestId"),
+        dedupeKey: `referral-side-effect:recharge:${payload.record.id}`,
+        detail: {
+          rechargeRecordId: payload.record.id,
+          userId,
+          source: payload.record.source,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        now: getCurrentTimestamp()
+      });
       console.error("apply referral effect after recharge failed", error);
     }
 
     return ok(c, payload);
   } catch (error) {
+    await emitAlertEventSafe(c.env.DB, {
+      severity: "error",
+      category: "recharge",
+      title: "会员充值失败",
+      message: "充值接口执行失败。",
+      requestId: c.get("requestId"),
+      dedupeKey: null,
+      detail: {
+        userId,
+        error: error instanceof Error ? error.message : String(error)
+      },
+      now: getCurrentTimestamp()
+    });
     console.error("recharge failed", error);
     return fail(c, 500, "failed to recharge user");
   }
@@ -2985,11 +3995,39 @@ app.post("/api/admin/users/:id/recharge/backfill", async (c) => {
         allowBackfillReward: grantReferralReward
       });
     } catch (error) {
+      await emitAlertEventSafe(c.env.DB, {
+        severity: "warning",
+        category: "referral_side_effect",
+        title: "历史补录后邀请奖励联动失败",
+        message: "补录已成功，但邀请奖励联动处理失败，需要人工复核。",
+        requestId: c.get("requestId"),
+        dedupeKey: `referral-side-effect:backfill:${payload.record.id}`,
+        detail: {
+          rechargeRecordId: payload.record.id,
+          userId,
+          source: payload.record.source,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        now: getCurrentTimestamp()
+      });
       console.error("apply referral effect after backfill failed", error);
     }
 
     return ok(c, payload);
   } catch (error) {
+    await emitAlertEventSafe(c.env.DB, {
+      severity: "error",
+      category: "recharge_backfill",
+      title: "历史补录失败",
+      message: "补录充值接口执行失败。",
+      requestId: c.get("requestId"),
+      dedupeKey: null,
+      detail: {
+        userId,
+        error: error instanceof Error ? error.message : String(error)
+      },
+      now: getCurrentTimestamp()
+    });
     console.error("recharge backfill failed", error);
     return fail(c, 500, "failed to backfill recharge record");
   }
@@ -3013,6 +4051,11 @@ app.post("/api/admin/recharge-records/:id/refund", async (c) => {
   if (!refundMigrationCheck.ok) {
     return refundMigrationCheck.response;
   }
+  const refundReliabilityMigrationCheck =
+    await requireRechargeRefundReliabilitySupport(c);
+  if (!refundReliabilityMigrationCheck.ok) {
+    return refundReliabilityMigrationCheck.response;
+  }
   const referralMigrationCheck = await requireReferralTables(c);
   if (!referralMigrationCheck.ok) {
     return referralMigrationCheck.response;
@@ -3027,146 +4070,370 @@ app.post("/api/admin/recharge-records/:id/refund", async (c) => {
     return fail(c, 400, `refundNote must be <= ${MAX_REFUND_NOTE_LENGTH} chars`);
   }
 
-  const target = await c.env.DB
-    .prepare(
-      `SELECT
-        r.id,
-        r.user_id,
-        u.username,
-        r.reason,
-        r.source,
-        r.change_days,
-        r.payment_amount_cents,
-        r.expire_before,
-        r.expire_after,
-        r.refunded_at
-       FROM recharge_records AS r
-       INNER JOIN users AS u ON u.id = r.user_id
-       WHERE r.id = ?
-       LIMIT 1`
-    )
-    .bind(rechargeRecordId)
-    .first<RechargeRefundTargetWithUserRow>();
+  const target = await getRechargeRefundTargetById(c.env.DB, rechargeRecordId);
   if (!target) {
     return fail(c, 404, "recharge record not found");
   }
-  if (target.refunded_at && target.refunded_at > 0) {
+  const existingTask = await getRefundRepairTaskByRechargeRecordId(
+    c.env.DB,
+    rechargeRecordId
+  );
+  if (
+    target.refunded_at &&
+    target.refunded_at > 0 &&
+    (!existingTask || existingTask.status === "resolved")
+  ) {
     return fail(c, 409, "recharge record already refunded");
   }
-  if ((target.change_days || 0) <= 0) {
-    return fail(c, 400, "only positive recharge records can be refunded");
-  }
-  if (target.source === RechargeRecordSource.REFUND_ROLLBACK) {
-    return fail(c, 400, "refund rollback records cannot be refunded again");
-  }
-
-  const now = getCurrentTimestamp();
-  const refundUsage = calculateRefundUsageSnapshot(target, now);
-  if (refundUsage.refundableDays <= 0 || refundUsage.refundableAmountCents <= 0) {
-    return fail(c, 400, "no refundable days left for this recharge record");
-  }
-
-  const resolvedRefundAmount = toPaymentAmount(refundUsage.refundableAmountCents);
-  if (refundAmount !== null) {
-    const requestedRefundAmount = Number(refundAmount.toFixed(2));
-    if (requestedRefundAmount !== resolvedRefundAmount) {
-      return fail(
-        c,
-        400,
-        `refundAmount must equal ${resolvedRefundAmount.toFixed(2)} under remaining-days refund rule`
-      );
-    }
-  }
-
-  if (resolvedRefundAmount < 0) {
+  try {
+    const payload = await processRefundRepair(c, {
+      target,
+      requestedRefundAmount: refundAmount,
+      requestedRefundNote: refundNote
+    });
+    return ok<AdminRefundRechargeResponseDTO>(c, {
+      user: payload.user,
+      originalRecord: payload.originalRecord,
+      refundRecord: payload.refundRecord
+    });
+  } catch (error) {
+    await emitAlertEventSafe(c.env.DB, {
+      severity: "error",
+      category: "refund_repair",
+      title: "退款闭环失败",
+      message: "退款接口执行失败，补偿任务已记录。",
+      requestId: c.get("requestId"),
+      dedupeKey: `refund-repair:${rechargeRecordId}`,
+      detail: {
+        rechargeRecordId,
+        error: error instanceof Error ? error.message : String(error)
+      },
+      now: getCurrentTimestamp()
+    });
+    console.error("refund recharge failed", error);
+    const errorMessage =
+      error instanceof Error && error.message
+        ? error.message
+        : "failed to refund recharge record";
+    const isClientError =
+      errorMessage.includes("refundAmount must equal") ||
+      errorMessage === "no refundable days left for this recharge record" ||
+      errorMessage === "only positive recharge records can be refunded" ||
+      errorMessage === "refund rollback records cannot be refunded again";
     return fail(
       c,
-      400,
-      `refundAmount must be ${resolvedRefundAmount.toFixed(2)}`
+      isClientError ? 400 : 500,
+      isClientError ? errorMessage : "failed to refund recharge record"
     );
   }
+});
 
-  const session = c.get("adminSession");
-  const markResult = await c.env.DB
-    .prepare(
-      `UPDATE recharge_records
-       SET refunded_at = ?, refund_note = ?, refunded_by_admin_id = ?, refund_amount_cents = ?
-       WHERE id = ? AND refunded_at IS NULL`
-    )
-    .bind(
-      now,
-      refundNote,
-      session.adminId,
-      refundUsage.refundableAmountCents,
-      rechargeRecordId
-    )
-    .run();
-  if (Number(markResult.meta?.changes || 0) === 0) {
-    return fail(c, 409, "recharge record already refunded");
+app.get("/api/admin/refund-repair-tasks", async (c) => {
+  const refundReliabilityMigrationCheck =
+    await requireRechargeRefundReliabilitySupport(c);
+  if (!refundReliabilityMigrationCheck.ok) {
+    return refundReliabilityMigrationCheck.response;
+  }
+
+  const rawLimit = Number(c.req.query("limit"));
+  const limit =
+    Number.isInteger(rawLimit) && rawLimit > 0
+      ? Math.min(rawLimit, MAX_RECHARGE_RECORD_LIMIT)
+      : DEFAULT_RECHARGE_RECORD_LIMIT;
+  const statusRaw = (c.req.query("status") || "pending").trim();
+  const status =
+    statusRaw === "all" || REFUND_REPAIR_TASK_STATUSES.has(statusRaw as RefundRepairTaskStatus)
+      ? statusRaw
+      : null;
+  if (!status) {
+    return fail(c, 400, "invalid refund repair task status");
+  }
+
+  const rows =
+    status === "all"
+      ? await c.env.DB
+        .prepare(
+          `SELECT
+            t.id,
+            t.recharge_record_id,
+            t.rollback_record_id,
+            t.status,
+            t.current_step,
+            t.intended_refund_days,
+            t.intended_refund_amount_cents,
+            t.intended_refund_note,
+            t.last_error,
+            t.retry_count,
+            t.rollback_applied_at,
+            t.referral_adjusted_at,
+            t.bonus_revoked_at,
+            t.refund_marked_at,
+            t.created_at,
+            t.updated_at,
+            t.resolved_at,
+            r.user_id,
+            u.username,
+            r.refunded_at,
+            r.refund_amount_cents,
+            r.refund_note
+           FROM refund_repair_tasks AS t
+           INNER JOIN recharge_records AS r ON r.id = t.recharge_record_id
+           INNER JOIN users AS u ON u.id = r.user_id
+           ORDER BY
+             CASE WHEN t.status = 'pending' THEN 0 ELSE 1 END,
+             t.updated_at DESC,
+             t.id DESC
+           LIMIT ?`
+        )
+        .bind(limit)
+        .all<RefundRepairTaskListRow>()
+      : await c.env.DB
+        .prepare(
+          `SELECT
+            t.id,
+            t.recharge_record_id,
+            t.rollback_record_id,
+            t.status,
+            t.current_step,
+            t.intended_refund_days,
+            t.intended_refund_amount_cents,
+            t.intended_refund_note,
+            t.last_error,
+            t.retry_count,
+            t.rollback_applied_at,
+            t.referral_adjusted_at,
+            t.bonus_revoked_at,
+            t.refund_marked_at,
+            t.created_at,
+            t.updated_at,
+            t.resolved_at,
+            r.user_id,
+            u.username,
+            r.refunded_at,
+            r.refund_amount_cents,
+            r.refund_note
+           FROM refund_repair_tasks AS t
+           INNER JOIN recharge_records AS r ON r.id = t.recharge_record_id
+           INNER JOIN users AS u ON u.id = r.user_id
+           WHERE t.status = ?
+           ORDER BY t.updated_at DESC, t.id DESC
+           LIMIT ?`
+        )
+        .bind(status, limit)
+        .all<RefundRepairTaskListRow>();
+
+  const payload: AdminListRefundRepairTasksResponseDTO = {
+    items: (rows.results || []).map((row) => toAdminRefundRepairTaskDTO(row)),
+    limit,
+    status: status as RefundRepairTaskStatus | "all"
+  };
+  return ok(c, payload);
+});
+
+app.post("/api/admin/refund-repair-tasks/:id/retry", async (c) => {
+  const rechargeRecordId = c.req.param("id")?.trim();
+  if (!rechargeRecordId) {
+    return fail(c, 400, "recharge record id is required");
+  }
+
+  const timelineMigrationCheck = await requireRechargeTimelineColumns(c);
+  if (!timelineMigrationCheck.ok) {
+    return timelineMigrationCheck.response;
+  }
+  const externalNoteMigrationCheck = await requireRechargeExternalNoteColumn(c);
+  if (!externalNoteMigrationCheck.ok) {
+    return externalNoteMigrationCheck.response;
+  }
+  const refundMigrationCheck = await requireRechargeRefundColumns(c);
+  if (!refundMigrationCheck.ok) {
+    return refundMigrationCheck.response;
+  }
+  const refundReliabilityMigrationCheck =
+    await requireRechargeRefundReliabilitySupport(c);
+  if (!refundReliabilityMigrationCheck.ok) {
+    return refundReliabilityMigrationCheck.response;
+  }
+  const referralMigrationCheck = await requireReferralTables(c);
+  if (!referralMigrationCheck.ok) {
+    return referralMigrationCheck.response;
+  }
+
+  const task = await getRefundRepairTaskByRechargeRecordId(c.env.DB, rechargeRecordId);
+  if (!task) {
+    return fail(c, 404, "refund repair task not found");
+  }
+  if (toRefundRepairTaskStatus(task.status) !== "pending") {
+    return fail(c, 409, "refund repair task already resolved");
+  }
+
+  const target = await getRechargeRefundTargetById(c.env.DB, rechargeRecordId);
+  if (!target) {
+    return fail(c, 404, "recharge record not found");
   }
 
   try {
-    const rollbackPayload = await createAndRebuildRechargeRecord(c, {
-      userId: target.user_id,
-      days: -refundUsage.refundableDays,
-      reason: RechargeReason.MANUAL_FIX,
-      paymentAmountCents: 0,
-      internalNote: `refund rollback for recharge record ${rechargeRecordId}`,
-      externalNote: "退款回滚会员天数",
-      occurredAt: now,
-      source: RechargeRecordSource.REFUND_ROLLBACK
+    const payload = await processRefundRepair(c, {
+      target,
+      requestedRefundAmount: null,
+      requestedRefundNote: task.intended_refund_note ?? null
     });
-    if (!rollbackPayload) {
-      return fail(c, 404, "target user not found");
-    }
-
-    await cancelReferralRewardsByRechargeRecord(c.env.DB, {
-      rechargeRecordId,
-      refundAmountCents: refundUsage.refundableAmountCents,
-      reason: "recharge refunded",
-      now
-    });
-
-    const bonusGrant = await findGrantedBonusByTriggerRechargeRecord(
-      c.env.DB,
-      rechargeRecordId
-    );
-    if (bonusGrant) {
-      const bonusRollback = await createAndRebuildRechargeRecord(c, {
-        userId: bonusGrant.invitee_user_id,
-        days: -Math.abs(bonusGrant.bonus_days),
-        reason: RechargeReason.MANUAL_FIX,
-        paymentAmountCents: 0,
-        internalNote: `revoke invite bonus for refunded recharge ${rechargeRecordId}`,
-        externalNote: "退款撤销邀请首单赠送",
-        occurredAt: now,
-        source: RechargeRecordSource.REFUND_ROLLBACK
-      });
-
-      if (bonusRollback) {
-        await markBonusGrantRevoked(c.env.DB, {
-          bonusGrantId: bonusGrant.id,
-          revokeRechargeRecordId: bonusRollback.record.id,
-          now
-        });
-      }
-    }
-
-    const originalRecord = await getRechargeRecordById(c.env.DB, rechargeRecordId);
-    if (!originalRecord) {
-      return fail(c, 500, "refunded recharge record not found");
-    }
-
-    const payload: AdminRefundRechargeResponseDTO = {
-      user: rollbackPayload.user,
-      originalRecord: toAdminRechargeRecordDTO(originalRecord),
-      refundRecord: rollbackPayload.record
-    };
-    return ok(c, payload);
+    return ok<AdminRetryRefundRepairTaskResponseDTO>(c, payload);
   } catch (error) {
-    console.error("refund recharge failed", error);
-    return fail(c, 500, "failed to refund recharge record");
+    await emitAlertEventSafe(c.env.DB, {
+      severity: "error",
+      category: "refund_repair_retry",
+      title: "补偿任务重试失败",
+      message: "手动重试补偿任务失败，任务仍保持待处理状态。",
+      requestId: c.get("requestId"),
+      dedupeKey: `refund-repair-retry:${rechargeRecordId}`,
+      detail: {
+        rechargeRecordId,
+        error: error instanceof Error ? error.message : String(error)
+      },
+      now: getCurrentTimestamp()
+    });
+    console.error("retry refund repair task failed", error);
+    return fail(c, 500, "failed to retry refund repair task");
   }
+});
+
+app.get("/api/admin/alert-events", async (c) => {
+  const alertSupportCheck = await requireAlertEventSupport(c);
+  if (!alertSupportCheck.ok) {
+    return alertSupportCheck.response;
+  }
+
+  const rawLimit = Number(c.req.query("limit"));
+  const limit =
+    Number.isInteger(rawLimit) && rawLimit > 0
+      ? Math.min(rawLimit, MAX_RECHARGE_RECORD_LIMIT)
+      : DEFAULT_RECHARGE_RECORD_LIMIT;
+  const statusRaw = (c.req.query("status") || "open").trim();
+  const severityRaw = (c.req.query("severity") || "all").trim();
+  const status =
+    statusRaw === "all" || ALERT_EVENT_STATUSES.has(statusRaw as AdminAlertStatus)
+      ? statusRaw
+      : null;
+  const severity =
+    severityRaw === "all" || ALERT_EVENT_SEVERITIES.has(severityRaw as AdminAlertSeverity)
+      ? severityRaw
+      : null;
+  if (!status) {
+    return fail(c, 400, "invalid alert event status");
+  }
+  if (!severity) {
+    return fail(c, 400, "invalid alert event severity");
+  }
+
+  const whereClauses: string[] = [];
+  const whereValues: Array<string | number> = [];
+  if (status !== "all") {
+    whereClauses.push("status = ?");
+    whereValues.push(status);
+  }
+  if (severity !== "all") {
+    whereClauses.push("severity = ?");
+    whereValues.push(severity);
+  }
+  const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+  const rows = await c.env.DB
+    .prepare(
+      `SELECT
+        id,
+        severity,
+        status,
+        category,
+        title,
+        message,
+        request_id,
+        dedupe_key,
+        detail_json,
+        occurrence_count,
+        created_at,
+        updated_at,
+        last_occurred_at,
+        acknowledged_at,
+        acknowledged_by_admin_id
+       FROM alert_events
+       ${whereSql}
+       ORDER BY
+         CASE WHEN status = 'open' THEN 0 ELSE 1 END,
+         updated_at DESC,
+         id DESC
+       LIMIT ?`
+    )
+    .bind(...whereValues, limit)
+    .all<AlertEventRow>();
+
+  const payload: AdminListAlertEventsResponseDTO = {
+    items: (rows.results || []).map((row) => toAdminAlertEventDTO(row)),
+    limit,
+    status: status as AdminAlertStatus | "all",
+    severity: severity as AdminAlertSeverity | "all"
+  };
+  return ok(c, payload);
+});
+
+app.post("/api/admin/alert-events/:id/acknowledge", async (c) => {
+  const alertSupportCheck = await requireAlertEventSupport(c);
+  if (!alertSupportCheck.ok) {
+    return alertSupportCheck.response;
+  }
+
+  const alertId = c.req.param("id")?.trim();
+  if (!alertId) {
+    return fail(c, 400, "alert event id is required");
+  }
+
+  const now = getCurrentTimestamp();
+  const session = c.get("adminSession");
+  const result = await c.env.DB
+    .prepare(
+      `UPDATE alert_events
+       SET status = 'acknowledged',
+           updated_at = ?,
+           acknowledged_at = ?,
+           acknowledged_by_admin_id = ?
+       WHERE id = ?`
+    )
+    .bind(now, now, session.adminId, alertId)
+    .run();
+  if (Number(result.meta?.changes || 0) === 0) {
+    return fail(c, 404, "alert event not found");
+  }
+
+  const row = await c.env.DB
+    .prepare(
+      `SELECT
+        id,
+        severity,
+        status,
+        category,
+        title,
+        message,
+        request_id,
+        dedupe_key,
+        detail_json,
+        occurrence_count,
+        created_at,
+        updated_at,
+        last_occurred_at,
+        acknowledged_at,
+        acknowledged_by_admin_id
+       FROM alert_events
+       WHERE id = ?
+       LIMIT 1`
+    )
+    .bind(alertId)
+    .first<AlertEventRow>();
+  if (!row) {
+    return fail(c, 404, "alert event not found");
+  }
+
+  const payload: AdminAcknowledgeAlertEventResponseDTO = {
+    alert: toAdminAlertEventDTO(row)
+  };
+  return ok(c, payload);
 });
 
 app.post("/api/admin/users/:id/reset-token", async (c) => {
@@ -3744,6 +5011,18 @@ const scheduled: ExportedHandlerScheduledHandler<Bindings> = async (
   try {
     await unlockPendingReferralRewards(env.DB, getCurrentTimestamp());
   } catch (error) {
+    await emitAlertEventSafe(env.DB, {
+      severity: "error",
+      category: "scheduler",
+      title: "定时解锁邀请奖励失败",
+      message: "cron 任务执行失败，邀请奖励解锁可能延迟。",
+      requestId: null,
+      dedupeKey: "scheduler:unlock-pending-referral-rewards",
+      detail: {
+        error: error instanceof Error ? error.message : String(error)
+      },
+      now: getCurrentTimestamp()
+    });
     console.error("scheduled unlock pending referral rewards failed", error);
   }
 };

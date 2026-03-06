@@ -411,7 +411,10 @@ export const ReferralRewardsPage = () => {
           </div>
           <Space>
             <Button onClick={() => navigate("/admin")}>用户管理</Button>
-            <Button type="primary" onClick={() => navigate("/admin/referral-withdrawals")}>提现流水</Button>
+            <Button type="primary" onClick={() => navigate("/admin/referral-rewards")}>奖励流水</Button>
+            <Button onClick={() => navigate("/admin/referral-withdrawals")}>提现流水</Button>
+            <Button onClick={() => navigate("/admin/refund-repair-tasks")}>补偿任务</Button>
+            <Button onClick={() => navigate("/admin/alert-events")}>告警中心</Button>
             <Button onClick={handleLogout} loading={loggingOut}>
               退出登录
             </Button>
