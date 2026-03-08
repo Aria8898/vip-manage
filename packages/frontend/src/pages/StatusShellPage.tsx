@@ -107,6 +107,16 @@ export const StatusShellPage = () => {
   }, [location.search, token]);
 
   useEffect(() => {
+    document.documentElement.classList.add("status-shell-page");
+    document.body.classList.add("status-shell-page");
+
+    return () => {
+      document.documentElement.classList.remove("status-shell-page");
+      document.body.classList.remove("status-shell-page");
+    };
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     const loadStatus = async () => {
