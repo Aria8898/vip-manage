@@ -21,6 +21,7 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import { useNavigate } from "react-router-dom";
 
+import { ADMIN_ROUTES } from "../app/routes";
 import { apiRequest } from "../api/client";
 
 type StatusFilter = AdminAlertStatus | "all";
@@ -128,7 +129,7 @@ export const AlertEventsPage = () => {
       await apiRequest("/admin/logout", {
         method: "POST",
       });
-      navigate("/admin/login", { replace: true });
+      navigate(ADMIN_ROUTES.login, { replace: true });
     } catch (error) {
       messageApi.error(error instanceof Error ? error.message : "退出失败");
     } finally {
@@ -345,11 +346,20 @@ export const AlertEventsPage = () => {
             </Typography.Paragraph>
           </div>
           <Space>
-            <Button onClick={() => navigate("/admin")}>用户管理</Button>
-            <Button onClick={() => navigate("/admin/referral-rewards")}>奖励流水</Button>
-            <Button onClick={() => navigate("/admin/referral-withdrawals")}>提现流水</Button>
-            <Button onClick={() => navigate("/admin/refund-repair-tasks")}>补偿任务</Button>
-            <Button type="primary" onClick={() => navigate("/admin/alert-events")}>
+            <Button onClick={() => navigate(ADMIN_ROUTES.home)}>用户管理</Button>
+            <Button onClick={() => navigate(ADMIN_ROUTES.referralRewards)}>
+              奖励流水
+            </Button>
+            <Button onClick={() => navigate(ADMIN_ROUTES.referralWithdrawals)}>
+              提现流水
+            </Button>
+            <Button onClick={() => navigate(ADMIN_ROUTES.refundRepairTasks)}>
+              补偿任务
+            </Button>
+            <Button
+              type="primary"
+              onClick={() => navigate(ADMIN_ROUTES.alertEvents)}
+            >
               告警中心
             </Button>
             <Button onClick={handleLogout} loading={loggingOut}>

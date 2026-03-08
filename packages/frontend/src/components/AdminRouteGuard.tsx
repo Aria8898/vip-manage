@@ -1,6 +1,7 @@
 import { type PropsWithChildren, useEffect, useState } from "react";
 import { Navigate, useLocation } from "react-router-dom";
 
+import { ADMIN_ROUTES } from "../app/routes";
 import { ApiRequestError } from "../api/client";
 import { fetchAdminSession } from "../auth/session";
 
@@ -54,7 +55,7 @@ export const AdminRouteGuard = ({ children }: PropsWithChildren) => {
   if (state === "unauthorized") {
     return (
       <Navigate
-        to="/admin/login"
+        to={ADMIN_ROUTES.login}
         replace
         state={{ from: `${location.pathname}${location.search}` }}
       />
@@ -72,4 +73,3 @@ export const AdminRouteGuard = ({ children }: PropsWithChildren) => {
 
   return <>{children}</>;
 };
-

@@ -2,6 +2,7 @@ import { type FormEvent, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import type { AdminLoginResponseDTO } from "@vip/shared";
 
+import { ADMIN_ROUTES } from "../app/routes";
 import { ApiRequestError, apiRequest } from "../api/client";
 import { fetchAdminSession } from "../auth/session";
 
@@ -24,7 +25,7 @@ export const AdminLoginPage = () => {
       try {
         await fetchAdminSession();
         if (!cancelled) {
-          navigate("/admin", { replace: true });
+          navigate(ADMIN_ROUTES.home, { replace: true });
         }
       } catch {
         // Not logged in, keep on current page.
@@ -53,7 +54,7 @@ export const AdminLoginPage = () => {
       });
 
       const routeState = location.state as LocationState | null;
-      navigate(routeState?.from || "/admin", { replace: true });
+      navigate(routeState?.from || ADMIN_ROUTES.home, { replace: true });
     } catch (error) {
       if (error instanceof ApiRequestError) {
         if (error.status === 429) {
@@ -108,4 +109,3 @@ export const AdminLoginPage = () => {
     </main>
   );
 };
-

@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5173",
     "build": "tsc -p tsconfig.json && vite build",
+    "build:admin": "VITE_APP_KIND=admin tsc -p tsconfig.json && VITE_APP_KIND=admin vite build",
+    "build:status": "VITE_APP_KIND=status tsc -p tsconfig.json && VITE_APP_KIND=status vite build",
     "preview": "vite preview --host 127.0.0.1 --port 4173",
     "typecheck": "tsc -p tsconfig.json"
   },
