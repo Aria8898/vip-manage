@@ -91,6 +91,9 @@ const formatHistoryPaymentAmount = (record: UserStatusHistoryRecordDTO): string 
 const getHistoryReasonTagClassName = (reason: RechargeReason): string =>
   REASON_TAG_CLASS_NAMES[reason] ?? "status-history-type-tag-default";
 
+const formatHistoryExpireBefore = (record: UserStatusHistoryRecordDTO): string =>
+  record.expireBefore > 0 ? formatUnixSeconds(record.expireBefore) : "首次开通";
+
 export const StatusShellPage = () => {
   const { token } = useParams<{ token: string }>();
   const location = useLocation();
@@ -330,6 +333,11 @@ export const StatusShellPage = () => {
                   message="当前会员已过期，请联系管理员充值后再使用。"
                 />
               ) : null}
+              <Alert
+                type="info"
+                showIcon
+                message="当前记录仅供参考。如果发现数据异常、系统 Bug，或有任何让产品更好用的点子，欢迎随时找客服反馈！"
+              />
             </Space>
           ) : null}
         </Card>
@@ -378,7 +386,7 @@ export const StatusShellPage = () => {
                         </Typography.Text>
                       ) : null}
                       <Typography.Text type="secondary" className="status-history-expire">
-                        到期变更：{formatUnixSeconds(item.expireBefore)} →{" "}
+                        到期变更：{formatHistoryExpireBefore(item)} →{" "}
                         {formatUnixSeconds(item.expireAfter)}
                       </Typography.Text>
                     </div>
