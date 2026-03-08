@@ -261,7 +261,7 @@ pnpm --filter @vip/backend admin:import -- --username admin --password "StrongPa
 ### 6. 部署后端 Worker
 
 ```bash
-pnpm --filter @vip/backend deploy
+pnpm --filter @vip/backend run deploy
 ```
 
 ### 7. 构建并部署前端
@@ -327,7 +327,7 @@ pnpm --filter @vip/frontend build:status
 pnpm typecheck
 pnpm db:migrate:local
 pnpm db:migrate:remote
-pnpm --filter @vip/backend deploy
+pnpm --filter @vip/backend run deploy
 ```
 
 ## 版本历史
