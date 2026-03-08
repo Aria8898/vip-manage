@@ -17,6 +17,19 @@ const joinPath = (basePath: string, childPath: string): string => {
   const normalizedChild = childPath.replace(/^\/+/u, "");
   return `${basePath}/${normalizedChild}`;
 };
+
+const normalizeOrigin = (value: string | undefined): string | null => {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    return new URL(trimmed).origin;
+  } catch {
+    return null;
+  }
+};
 export const ADMIN_BASE_PATH = normalizeBasePath(
   import.meta.env.VITE_ADMIN_BASE_PATH,
   "/admin"
@@ -24,6 +37,9 @@ export const ADMIN_BASE_PATH = normalizeBasePath(
 export const STATUS_BASE_PATH = normalizeBasePath(
   import.meta.env.VITE_STATUS_BASE_PATH,
   "/status"
+);
+export const STATUS_SITE_ORIGIN = normalizeOrigin(
+  import.meta.env.VITE_STATUS_SITE_ORIGIN
 );
 
 export const ADMIN_ROUTES = {

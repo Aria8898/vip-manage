@@ -46,7 +46,7 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import { useNavigate } from "react-router-dom";
 
-import { ADMIN_ROUTES } from "../app/routes";
+import { ADMIN_ROUTES, STATUS_BASE_PATH, STATUS_SITE_ORIGIN } from "../app/routes";
 import { apiRequest } from "../api/client";
 import { fetchAdminSession } from "../auth/session";
 
@@ -422,7 +422,8 @@ export const AdminShellPage = () => {
 
   const buildStatusLink = useCallback((statusToken: string) => {
     const encodedToken = encodeURIComponent(statusToken);
-    return `${window.location.origin}/status/${encodedToken}`;
+    const baseOrigin = STATUS_SITE_ORIGIN || window.location.origin;
+    return new URL(`${STATUS_BASE_PATH}/${encodedToken}`, `${baseOrigin}/`).toString();
   }, []);
 
   const formatRechargeReason = useCallback((reason: RechargeReason) => {

@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1 --port 5173",
+    "dev": "VITE_APP_KIND=admin vite --host 127.0.0.1 --port 5173",
+    "dev:admin": "VITE_APP_KIND=admin vite --host 127.0.0.1 --port 5173",
+    "dev:status": "VITE_APP_KIND=status vite --host 127.0.0.1 --port 4174",
     "build": "tsc -p tsconfig.json && vite build",
     "build:admin": "VITE_APP_KIND=admin tsc -p tsconfig.json && VITE_APP_KIND=admin vite build",
     "build:status": "VITE_APP_KIND=status tsc -p tsconfig.json && VITE_APP_KIND=status vite build",
