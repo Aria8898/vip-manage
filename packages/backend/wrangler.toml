@@ -3,12 +3,12 @@ main = "src/index.ts"
 compatibility_date = "2025-11-01"
 
 [vars]
-APP_ENV = "development"
+APP_ENV = "production"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "vip-membership-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "7d8eac37-8ca9-42a6-9853-561886e98ae9"
 migrations_dir = "migrations"
 
 [triggers]
