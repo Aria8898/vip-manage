@@ -9,6 +9,7 @@ import {
   Alert,
   Card,
   Empty,
+  FloatButton,
   Skeleton,
   Space,
   Statistic,
@@ -19,6 +20,7 @@ import {
 import { useLocation, useParams } from "react-router-dom";
 
 import { apiRequest, ApiRequestError } from "../api/client";
+import ContactServiceModal from "../components/ContactServiceModal";
 
 const REASON_LABELS: Record<RechargeReason, string> = {
   [RechargeReason.WECHAT_PAY]: "微信支付",
@@ -94,6 +96,7 @@ export const StatusShellPage = () => {
   const location = useLocation();
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const [contactModalOpen, setContactModalOpen] = useState(false);
   const [statusData, setStatusData] = useState<UserStatusResponseDTO | null>(
     null,
   );
@@ -161,224 +164,245 @@ export const StatusShellPage = () => {
     statusData?.capabilities?.canViewReferralReward ?? true;
 
   return (
-    <main className="shell status-shell">
-      <Card bordered={false}>
-        {loading ? (
-          <Skeleton active paragraph={{ rows: 4 }} />
-        ) : errorMessage ? (
-          <Alert type="error" showIcon message={errorMessage} />
-        ) : statusData ? (
-          <Space direction="vertical" size={16} style={{ width: "100%" }}>
-            <div>
-              <Typography.Title level={3} style={{ marginBottom: 8 }}>
-                你好，{statusData.user.username}
-              </Typography.Title>
+    <>
+      <main className="shell status-shell">
+        <Card bordered={false}>
+          {loading ? (
+            <Skeleton active paragraph={{ rows: 4 }} />
+          ) : errorMessage ? (
+            <Alert type="error" showIcon message={errorMessage} />
+          ) : statusData ? (
+            <Space direction="vertical" size={16} style={{ width: "100%" }}>
+              <div>
+                <Typography.Title level={3} style={{ marginBottom: 8 }}>
+                  你好，{statusData.user.username}
+                </Typography.Title>
 
-              <Space wrap style={{ marginBottom: 8 }}>
-                <Typography.Text type="secondary">
-                  {statusData.user.userEmail || ""}
-                </Typography.Text>
-                {isActive ? (
-                  <Tag color="success">Gemini Pro 会员使用中</Tag>
-                ) : (
-                  <Tag color="default">会员已过期</Tag>
-                )}
-              </Space>
-              <Typography.Text type="secondary" style={{ display: "block" }}>
-                北京时间：{formatUnixSeconds(statusData.now)}
-              </Typography.Text>
-            </div>
-
-            <Card size="small">
-              <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                <Statistic
-                  title="剩余天数"
-                  value={statusData.user.remainingDays}
-                  suffix="天"
-                  valueStyle={{
-                    color: isExpiringSoon
-                      ? "#dc2626"
-                      : isActive
-                        ? "#047857"
-                        : "#64748b",
-                    fontWeight: 700,
-                  }}
-                />
-                <Typography.Text type="secondary">
-                  有效期至：{formatUnixSeconds(statusData.user.expireAt)}
-                </Typography.Text>
-                <Typography.Text type="secondary">
-                  已使用 {statusData.user.usedDays} 天
-                </Typography.Text>
-              </Space>
-            </Card>
-
-            {canViewReferralReward ? (
-              <Card size="small" title="邀请奖励">
-                <Space
-                  wrap
-                  size={[24, 16]}
-                  style={{ width: "100%", marginBottom: 12 }}
-                >
-                  <Statistic
-                    title="已邀请人数"
-                    value={statusData.referral.inviteeCount}
-                    suffix="人"
-                  />
-                  <Statistic
-                    title="预计奖励"
-                    value={statusData.referral.pendingRewardAmount}
-                    precision={2}
-                    prefix="¥"
-                  />
-                  <Statistic
-                    title="可提现（净额）"
-                    value={statusData.referral.availableRewardAmount}
-                    precision={2}
-                    prefix="¥"
-                  />
-                  <Statistic
-                    title="奖励债务"
-                    value={statusData.referral.rewardDebtAmount}
-                    precision={2}
-                    prefix="¥"
-                  />
-                  <Statistic
-                    title="已提现"
-                    value={statusData.referral.withdrawnRewardAmount}
-                    precision={2}
-                    prefix="¥"
-                  />
+                <Space wrap style={{ marginBottom: 8 }}>
+                  <Typography.Text type="secondary">
+                    {statusData.user.userEmail || ""}
+                  </Typography.Text>
+                  {isActive ? (
+                    <Tag color="success">Gemini Pro 会员使用中</Tag>
+                  ) : (
+                    <Tag color="default">会员已过期</Tag>
+                  )}
                 </Space>
                 <Typography.Text type="secondary" style={{ display: "block" }}>
-                  结算说明：被邀请人每成功使用 24 小时解锁一天奖励；退款后会按剩余天数回收未结算奖励，净可提现会先抵扣历史债务。
+                  北京时间：{formatUnixSeconds(statusData.now)}
                 </Typography.Text>
+              </div>
 
-                {statusData.referral.invitees.length > 0 ? (
-                  <Space
-                    direction="vertical"
-                    size={8}
-                    style={{ width: "100%", marginTop: 12 }}
-                  >
-                    {statusData.referral.invitees.map((invitee) => (
-                      <Card
-                        key={invitee.inviteeUserId}
-                        size="small"
-                        style={{ backgroundColor: "#fafafa" }}
-                      >
-                        <Space
-                          direction="vertical"
-                          size={4}
-                          style={{ width: "100%" }}
-                        >
-                          <Typography.Text strong>
-                            {invitee.inviteeUsername}
-                          </Typography.Text>
-                          <Space wrap size={8}>
-                            <Tag color="orange">
-                              预计 {formatCurrency(invitee.pendingRewardAmount)}
-                            </Tag>
-                            <Tag color="green">
-                              可提现 {formatCurrency(invitee.availableRewardAmount)}
-                            </Tag>
-                            <Tag color="blue">
-                              已提现 {formatCurrency(invitee.withdrawnRewardAmount)}
-                            </Tag>
-                            <Tag>
-                              累计 {formatCurrency(invitee.totalRewardAmount)}
-                            </Tag>
-                          </Space>
-                        </Space>
-                      </Card>
-                    ))}
-                  </Space>
-                ) : (
-                  <Empty
-                    style={{ marginTop: 12 }}
-                    image={Empty.PRESENTED_IMAGE_SIMPLE}
-                    description="暂无邀请奖励记录"
+              <Card size="small">
+                <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                  <Statistic
+                    title="剩余天数"
+                    value={statusData.user.remainingDays}
+                    suffix="天"
+                    valueStyle={{
+                      color: isExpiringSoon
+                        ? "#dc2626"
+                        : isActive
+                          ? "#047857"
+                          : "#64748b",
+                      fontWeight: 700,
+                    }}
                   />
-                )}
+                  <Typography.Text type="secondary">
+                    有效期至：{formatUnixSeconds(statusData.user.expireAt)}
+                  </Typography.Text>
+                  <Typography.Text type="secondary">
+                    已使用 {statusData.user.usedDays} 天
+                  </Typography.Text>
+                </Space>
               </Card>
-            ) : null}
 
-            {isExpiringSoon ? (
-              <Alert
-                type="warning"
-                showIcon
-                message={`剩余 ${statusData.user.remainingDays} 天，请及时续费。`}
-              />
-            ) : null}
-            {!isActive ? (
-              <Alert
-                type="error"
-                showIcon
-                message="当前会员已过期，请联系管理员充值后再使用。"
-              />
-            ) : null}
-          </Space>
-        ) : null}
-      </Card>
+              {canViewReferralReward ? (
+                <Card size="small" title="邀请奖励">
+                  <Space
+                    wrap
+                    size={[24, 16]}
+                    style={{ width: "100%", marginBottom: 12 }}
+                  >
+                    <Statistic
+                      title="已邀请人数"
+                      value={statusData.referral.inviteeCount}
+                      suffix="人"
+                    />
+                    <Statistic
+                      title="预计奖励"
+                      value={statusData.referral.pendingRewardAmount}
+                      precision={2}
+                      prefix="¥"
+                    />
+                    <Statistic
+                      title="可提现（净额）"
+                      value={statusData.referral.availableRewardAmount}
+                      precision={2}
+                      prefix="¥"
+                    />
+                    <Statistic
+                      title="奖励债务"
+                      value={statusData.referral.rewardDebtAmount}
+                      precision={2}
+                      prefix="¥"
+                    />
+                    <Statistic
+                      title="已提现"
+                      value={statusData.referral.withdrawnRewardAmount}
+                      precision={2}
+                      prefix="¥"
+                    />
+                  </Space>
+                  <Typography.Text type="secondary" style={{ display: "block" }}>
+                    结算说明：被邀请人每成功使用 24 小时解锁一天奖励；退款后会按剩余天数回收未结算奖励，净可提现会先抵扣历史债务。
+                  </Typography.Text>
 
-      <Card className="status-history-card" title="变动历史" bordered={false}>
-        {loading ? (
-          <Skeleton active paragraph={{ rows: 5 }} />
-        ) : statusData && statusData.history.length > 0 ? (
-          <Timeline
-            items={statusData.history.map((item) => {
-              const reasonVisual = getHistoryReasonVisual(item.reason);
-              const reasonText = REASON_LABELS[item.reason] || item.reason;
-
-              return {
-                color: reasonVisual.timelineColor,
-                children: (
-                  <div className="status-history-item">
-                    <Typography.Text type="secondary" className="status-history-time">
-                      {formatUnixSeconds(item.createdAt)}
-                    </Typography.Text>
-                    <Space wrap size={[16, 6]} className="status-history-facts-row">
-                      <Typography.Text className="status-history-fact status-history-fact-type">
-                        <span className="status-history-fact-label">类型</span>
-                        <Tag
-                          className={`status-history-type-tag ${getHistoryReasonTagClassName(item.reason)}`}
+                  {statusData.referral.invitees.length > 0 ? (
+                    <Space
+                      direction="vertical"
+                      size={8}
+                      style={{ width: "100%", marginTop: 12 }}
+                    >
+                      {statusData.referral.invitees.map((invitee) => (
+                        <Card
+                          key={invitee.inviteeUserId}
+                          size="small"
+                          style={{ backgroundColor: "#fafafa" }}
                         >
-                          {reasonText}
-                        </Tag>
-                      </Typography.Text>
-                      <Typography.Text className="status-history-fact">
-                        <span className="status-history-fact-label">天数</span>
-                        <span className="status-history-fact-value status-history-fact-value-days">
-                          {formatHistoryChangeDays(item)}
-                        </span>
-                      </Typography.Text>
-                      <Typography.Text className="status-history-fact">
-                        <span className="status-history-fact-label">金额</span>
-                        <span className="status-history-fact-value">
-                          {formatHistoryPaymentAmount(item)}
-                        </span>
-                      </Typography.Text>
+                          <Space
+                            direction="vertical"
+                            size={4}
+                            style={{ width: "100%" }}
+                          >
+                            <Typography.Text strong>
+                              {invitee.inviteeUsername}
+                            </Typography.Text>
+                            <Space wrap size={8}>
+                              <Tag color="orange">
+                                预计 {formatCurrency(invitee.pendingRewardAmount)}
+                              </Tag>
+                              <Tag color="green">
+                                可提现 {formatCurrency(invitee.availableRewardAmount)}
+                              </Tag>
+                              <Tag color="blue">
+                                已提现 {formatCurrency(invitee.withdrawnRewardAmount)}
+                              </Tag>
+                              <Tag>
+                                累计 {formatCurrency(invitee.totalRewardAmount)}
+                              </Tag>
+                            </Space>
+                          </Space>
+                        </Card>
+                      ))}
                     </Space>
-                    {item.externalNote ? (
-                      <Typography.Text type="secondary">
-                        {item.externalNote}
+                  ) : (
+                    <Empty
+                      style={{ marginTop: 12 }}
+                      image={Empty.PRESENTED_IMAGE_SIMPLE}
+                      description="暂无邀请奖励记录"
+                    />
+                  )}
+                </Card>
+              ) : null}
+
+              {isExpiringSoon ? (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message={`剩余 ${statusData.user.remainingDays} 天，请及时续费。`}
+                />
+              ) : null}
+              {!isActive ? (
+                <Alert
+                  type="error"
+                  showIcon
+                  message="当前会员已过期，请联系管理员充值后再使用。"
+                />
+              ) : null}
+            </Space>
+          ) : null}
+        </Card>
+
+        <Card className="status-history-card" title="变动历史" bordered={false}>
+          {loading ? (
+            <Skeleton active paragraph={{ rows: 5 }} />
+          ) : statusData && statusData.history.length > 0 ? (
+            <Timeline
+              items={statusData.history.map((item) => {
+                const reasonVisual = getHistoryReasonVisual(item.reason);
+                const reasonText = REASON_LABELS[item.reason] || item.reason;
+
+                return {
+                  color: reasonVisual.timelineColor,
+                  children: (
+                    <div className="status-history-item">
+                      <Typography.Text type="secondary" className="status-history-time">
+                        {formatUnixSeconds(item.createdAt)}
                       </Typography.Text>
-                    ) : null}
-                    <Typography.Text type="secondary" className="status-history-expire">
-                      到期变更：{formatUnixSeconds(item.expireBefore)} →{" "}
-                      {formatUnixSeconds(item.expireAfter)}
-                    </Typography.Text>
-                  </div>
-                ),
-              };
-            })}
-          />
-        ) : (
-          <Empty
-            image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description="暂无变动记录"
-          />
-        )}
-      </Card>
-    </main>
+                      <Space wrap size={[16, 6]} className="status-history-facts-row">
+                        <Typography.Text className="status-history-fact status-history-fact-type">
+                          <span className="status-history-fact-label">类型</span>
+                          <Tag
+                            className={`status-history-type-tag ${getHistoryReasonTagClassName(item.reason)}`}
+                          >
+                            {reasonText}
+                          </Tag>
+                        </Typography.Text>
+                        <Typography.Text className="status-history-fact">
+                          <span className="status-history-fact-label">天数</span>
+                          <span className="status-history-fact-value status-history-fact-value-days">
+                            {formatHistoryChangeDays(item)}
+                          </span>
+                        </Typography.Text>
+                        <Typography.Text className="status-history-fact">
+                          <span className="status-history-fact-label">金额</span>
+                          <span className="status-history-fact-value">
+                            {formatHistoryPaymentAmount(item)}
+                          </span>
+                        </Typography.Text>
+                      </Space>
+                      {item.externalNote ? (
+                        <Typography.Text type="secondary">
+                          {item.externalNote}
+                        </Typography.Text>
+                      ) : null}
+                      <Typography.Text type="secondary" className="status-history-expire">
+                        到期变更：{formatUnixSeconds(item.expireBefore)} →{" "}
+                        {formatUnixSeconds(item.expireAfter)}
+                      </Typography.Text>
+                    </div>
+                  ),
+                };
+              })}
+            />
+          ) : (
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description="暂无变动记录"
+            />
+          )}
+        </Card>
+      </main>
+
+      <FloatButton
+        type="primary"
+        tooltip="联系客服"
+        onClick={() => setContactModalOpen(true)}
+        icon={
+          <span className="status-contact-float-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false">
+              <path d="M12 3a7 7 0 0 0-7 7v2.5A2.5 2.5 0 0 0 7.5 15H9v-5H7a5 5 0 1 1 10 0h-2v5h1.5a2.5 2.5 0 0 0 2.5-2.5V10a7 7 0 0 0-7-7Z" />
+              <path d="M9.5 16.5A2.5 2.5 0 0 0 12 19h2.75a1.25 1.25 0 0 0 0-2.5H12a.5.5 0 0 1-.5-.5v-.5h-2Z" />
+            </svg>
+          </span>
+        }
+      />
+      <ContactServiceModal
+        open={contactModalOpen}
+        onClose={() => setContactModalOpen(false)}
+        productName="Gemini Pro 会员"
+      />
+    </>
   );
 };
