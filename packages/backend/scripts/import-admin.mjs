@@ -3,7 +3,8 @@
 import { pbkdf2Sync, randomBytes, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
-const ITERATIONS = 210_000;
+// Cloudflare Workers currently caps PBKDF2 iterations at 100,000.
+const ITERATIONS = 100_000;
 const KEY_LENGTH = 32;
 const DIGEST = "sha256";
 const DEFAULT_DB_BINDING = "DB";

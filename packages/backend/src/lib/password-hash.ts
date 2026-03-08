@@ -80,6 +80,10 @@ export const verifyPasswordHash = async (
     return false;
   }
 
-  const computedHash = await derivePasswordHash(password, saltBytes, iterations);
-  return timingSafeEqual(computedHash, expectedHash);
+  try {
+    const computedHash = await derivePasswordHash(password, saltBytes, iterations);
+    return timingSafeEqual(computedHash, expectedHash);
+  } catch {
+    return false;
+  }
 };
